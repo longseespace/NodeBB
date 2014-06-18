@@ -15,6 +15,7 @@
     "test": "mocha ./tests -t 10000"
   },
   "dependencies": {
+    "pbkdf2-sha256": "~1.0.1",
     "express": "3.2.0",
     "express-namespace": "~0.1.1",
     "socket.io": "~0.9.16",

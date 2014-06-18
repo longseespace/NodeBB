@@ -129,6 +129,10 @@ function start() {
 
 			templates.setGlobal('relative_path', nconf.get('relative_path'));
 
+			// migrate
+			var migrate = require('./migrate');
+			migrate.start();
+
 			upgrade.check(function(schema_ok) {
 				if (schema_ok || nconf.get('check-schema') === false) {
 					sockets.init(webserver.server);

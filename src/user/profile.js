@@ -5,6 +5,8 @@ var bcrypt = require('bcryptjs'),
 	async = require('async'),
 	validator = require('validator'),
 	S = require('string'),
+	nconf = require('nconf'),
+	pbkdf2 = require('pbkdf2-sha256'),
 
 	utils = require('./../../public/src/utils'),
 	meta = require('./../meta'),
@@ -200,11 +202,11 @@ module.exports = function(User) {
 		}
 
 		function hashAndSetPassword(callback) {
-			User.hashPassword(data.newPassword, function(err, hash) {
+			User.hashPassword(data.newPassword, function(err, hash, salt) {
 				if(err) {
 					return callback(err);
 				}
-
+				User.setUserField(data.uid, 'salt', salt);
 				User.setUserField(data.uid, 'password', hash, function(err) {
 					if(err) {
 						return callback(err);
@@ -234,20 +236,23 @@ module.exports = function(User) {
 				hashAndSetPassword(callback);
 			});
 		} else {
-			db.getObjectField('user:' + uid, 'password', function(err, currentPassword) {
+			db.getObjectFields('user:' + uid, ['password', 'salt'], function(err, userData) {
 				if(err) {
 					return callback(err);
 				}
 
-				if (!currentPassword) {
+				if (!userData || !userData.password) {
 					return hashAndSetPassword(callback);
 				}
 
-				bcrypt.compare(data.currentPassword, currentPassword, function(err, res) {
-					if (err || !res) {
-						return callback(err || new Error('[[user:change_password_error_wrong_current]]'));
+				async.nextTick(function(){
+					var hash = pbkdf2(data.currentPassword, userData.salt, 64000, 32).toString('hex');
+
+					if (hash == userData.password) {
+						hashAndSetPassword(callback);
+					} else {
+						return callback(new Error('[[user:change_password_error_wrong_current]]'));
 					}
-					hashAndSetPassword(callback);
 				});
 			});
 		}

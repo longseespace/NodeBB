@@ -24,6 +24,9 @@ module.exports = function(User) {
 		var password = userData.password;
 		userData.password = null;
 
+		var hashedPassword = userData.hashedPassword;
+		userData.hashedPassword = null;
+
 		async.parallel([
 			function(next) {
 				if (userData.email) {
@@ -107,7 +110,8 @@ module.exports = function(User) {
 					'uid': uid,
 					'username': userData.username,
 					'userslug': userData.userslug,
-					'fullname': '',
+					'salt': userData.salt,
+					'fullname': userData.fullname || '',
 					'location': '',
 					'birthday': '',
 					'website': '',
@@ -159,15 +163,25 @@ module.exports = function(User) {
 						});
 					}
 
-					if (password) {
-						User.hashPassword(password, function(err, hash) {
+					if (hashedPassword) {
+						User.setUserField(uid, 'password', hashedPassword);
+						callback(null, uid);
+					} else if (password) {
+						var hashCallback = function(err, hash, salt) {
 							if(err) {
 								return callback(err);
 							}
 
 							User.setUserField(uid, 'password', hash);
+							User.setUserField(uid, 'salt', salt);
 							callback(null, uid);
-						});
+						};
+
+						if (userData.salt) {
+							User.hashPasswordWithSalt(password, userData.salt, hashCallback);
+						} else {
+							User.hashPassword(password, hashCallback);
+						}
 					} else {
 						callback(null, uid);
 					}

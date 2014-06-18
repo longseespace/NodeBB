@@ -6,6 +6,7 @@ var bcrypt = require('bcryptjs'),
 	winston = require('winston'),
 	gravatar = require('gravatar'),
 	S = require('string'),
+	pbkdf2 = require('pbkdf2-sha256'),
 
 	utils = require('./../public/src/utils'),
 	plugins = require('./plugins'),
@@ -301,9 +302,24 @@ var bcrypt = require('bcryptjs'),
 			if (err) {
 				return callback(err);
 			}
-			bcrypt.hash(password, salt, callback);
+
+			async.nextTick(function(){
+				var hash = pbkdf2(password, salt, 64000, 32).toString('hex');
+				callback(null, hash, salt);
+			});
 		});
 	};
+
+	User.hashPasswordWithSalt = function(password, salt, callback) {
+		if (!password) {
+			return callback(null, password);
+		}
+
+		async.nextTick(function(){
+			var hash = pbkdf2(password, salt, 64000, 32).toString('hex');
+			callback(null, hash, salt);
+		});
+	}
 
 	User.onNewPostMade = function(postData) {
 		User.addPostIdToUser(postData.uid, postData.pid, postData.timestamp);

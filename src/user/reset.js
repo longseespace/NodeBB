@@ -75,8 +75,9 @@ var async = require('async'),
 						return callback(err);
 					}
 
-					user.hashPassword(password, function(err, hash) {
+					user.hashPassword(password, function(err, hash, salt) {
 						user.setUserField(uid, 'password', hash);
+						user.setUserField(uid, 'salt', salt);
 						events.logPasswordReset(uid);
 					});
 

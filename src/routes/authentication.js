@@ -6,6 +6,8 @@
 		nconf = require('nconf'),
 		bcrypt = require('bcryptjs'),
 		winston = require('winston'),
+		pbkdf2 = require('pbkdf2-sha256'),
+		async = require('async'),
 
 		meta = require('./../meta'),
 		user = require('./../user'),
@@ -180,7 +182,7 @@
 					return next(null, false, err.message);
 				}
 
-				db.getObjectFields('user:' + uid, ['password', 'banned'], function(err, userData) {
+				db.getObjectFields('user:' + uid, ['password', 'banned', 'salt'], function(err, userData) {
 					if (err) {
 						return next(err);
 					}
@@ -193,20 +195,18 @@
 						return next(null, false, '[[error:user-banned]]');
 					}
 
-					bcrypt.compare(password, userData.password, function(err, res) {
-						if (err) {
-							return next(new Error('bcrypt compare error'));
-						}
+					async.nextTick(function(){
+						var hash = pbkdf2(password, userData.salt, 64000, 32).toString('hex');
 
-						if (!res) {
+						if (hash == userData.password) {
+							user.auth.clearLoginAttempts(uid);
+
+							next(null, {
+								uid: uid
+							}, '[[success:authentication-successful]]');
+						} else {
 							return next(null, false, '[[error:invalid-password]]');
 						}
-
-						user.auth.clearLoginAttempts(uid);
-
-						next(null, {
-							uid: uid
-						}, '[[success:authentication-successful]]');
 					});
 				});
 			});
