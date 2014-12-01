@@ -13,15 +13,17 @@
     "please_log_in": "Sila daftar masuk",
     "logout": "Log Keluar",
     "posting_restriction_info": "Kiriman terhad kepada pengguna berdaftar sahaja, Sila click disini untuk daftar masuk",
-    "welcome_back": "Selamat datang kembali",
+    "welcome_back": "Welcome Back",
     "you_have_successfully_logged_in": "Anda telah daftar keluar",
     "save_changes": "simpan perubahan",
     "close": "Tutup",
     "pagination": "Mukasurat",
     "pagination.out_of": "%1 out of %2",
+    "pagination.enter_index": "Enter index",
     "header.admin": "Pentadbir",
     "header.recent": "terkini",
     "header.unread": "Belum dibaca",
+    "header.tags": "Tags",
     "header.popular": "popular",
     "header.users": "pengguna",
     "header.chats": "chats",
@@ -67,5 +69,8 @@
     "email": "Emel",
     "language": "Bahasa",
     "guest": "Guest",
-    "guests": "Guests"
+    "guests": "Guests",
+    "updated.title": "Forum Updated",
+    "updated.message": "This forum has just been updated to the latest version. Click here to refresh the page.",
+    "privacy": "Privacy"
 }

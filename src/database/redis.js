@@ -5,7 +5,7 @@
 	var winston = require('winston'),
 		nconf = require('nconf'),
 		path = require('path'),
-		express = require('express'),
+		session = require('express-session'),
 		utils = require('./../../public/src/utils.js'),
 		redis,
 		connectRedis,
@@ -40,32 +40,14 @@
 	module.init = function(callback) {
 		try {
 			redis = require('redis');
-			connectRedis = require('connect-redis')(express);
+			connectRedis = require('connect-redis')(session);
 			reds = require('reds');
 		} catch (err) {
 			winston.error('Unable to initialize Redis! Is Redis installed? Error :' + err.message);
 			process.exit();
 		}
 
-		var redis_socket_or_host = nconf.get('redis:host');
-
-		if (redis_socket_or_host && redis_socket_or_host.indexOf('/')>=0) {
-			/* If redis.host contains a path name character, use the unix dom sock connection. ie, /tmp/redis.sock */
-			redisClient = redis.createClient(nconf.get('redis:host'));
-		} else {
-			/* Else, connect over tcp/ip */
-			redisClient = redis.createClient(nconf.get('redis:port'), nconf.get('redis:host'));
-		}
-
-		if (nconf.get('redis:password')) {
-			redisClient.auth(nconf.get('redis:password'));
-		} else {
-			winston.warn('You have no redis password setup!');
-		}
-
-		redisClient.on('error', function (err) {
-			winston.error(err.stack);
-		});
+		redisClient = module.connect();
 
 		module.client = redisClient;
 
@@ -81,17 +63,6 @@
 		module.postSearch = reds.createSearch('nodebbpostsearch');
 		module.topicSearch = reds.createSearch('nodebbtopicsearch');
 
-		var db = parseInt(nconf.get('redis:database'), 10);
-
-		if (db) {
-			redisClient.select(db, function(error) {
-				if(error) {
-					winston.error("NodeBB could not connect to your Redis database. Redis returned the following error: " + error.message);
-					process.exit();
-				}
-			});
-		}
-
 		require('./redis/main')(redisClient, module);
 		require('./redis/hash')(redisClient, module);
 		require('./redis/sets')(redisClient, module);
@@ -101,6 +72,44 @@
 		if(typeof callback === 'function') {
 			callback();
 		}
+	};
+
+	module.connect = function() {
+		var redis_socket_or_host = nconf.get('redis:host'),
+			cxn, dbIdx;
+
+		if (!redis) {
+			redis = require('redis');
+		}
+
+		if (redis_socket_or_host && redis_socket_or_host.indexOf('/') >= 0) {
+			/* If redis.host contains a path name character, use the unix dom sock connection. ie, /tmp/redis.sock */
+			cxn = redis.createClient(nconf.get('redis:host'));
+		} else {
+			/* Else, connect over tcp/ip */
+			cxn = redis.createClient(nconf.get('redis:port'), nconf.get('redis:host'));
+		}
+
+		if (nconf.get('redis:password')) {
+			cxn.auth(nconf.get('redis:password'));
+		}
+
+		dbIdx = parseInt(nconf.get('redis:database'), 10);
+		if (dbIdx) {
+			cxn.select(dbIdx, function(error) {
+				if(error) {
+					winston.error("NodeBB could not connect to your Redis database. Redis returned the following error: " + error.message);
+					process.exit();
+				}
+			});
+		}
+
+		cxn.on('error', function (err) {
+			winston.error(err.stack);
+			process.exit(1);
+		});
+
+		return cxn;
 	};
 
 	module.close = function() {

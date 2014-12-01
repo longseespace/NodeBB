@@ -1,14 +1,16 @@
 'use strict';
 /* globals define, translator, templates */
 
-define(function() {
-
+define('alerts', function() {
 	var module = {};
 
 	module.alert = function (params) {
 		params.alert_id = 'alert_button_' + (params.alert_id ? params.alert_id : new Date().getTime());
-		params.title = params.title || '';
-		params.location = (params.location || 'right-top');
+		params.title = params.title ? params.title.trim() || '' : '';
+		params.message = params.message ? params.message.trim() : '';
+
+		params.location = params.location || 'right-top';
+		params.type = params.type || 'info';
 
 		var alert = $('#' + params.alert_id);
 		if (alert.length) {
@@ -21,7 +23,11 @@ define(function() {
 	function createNew(params) {
 		templates.parse('alert', params, function(alertTpl) {
 			translator.translate(alertTpl, function(translatedHTML) {
-				var alert = $(translatedHTML);
+				var alert = $('#' + params.alert_id);
+				if (alert.length) {
+					return updateAlert(alert, params);
+				}
+				alert = $(translatedHTML);
 				alert.fadeIn(200);
 
 				$('.alert-' + params.location).prepend(alert);
@@ -61,8 +67,10 @@ define(function() {
 		alert.find('p').html(params.message);
 		alert.attr('class', 'alert alert-dismissable alert-' + params.type);
 
-		clearTimeout(alert.attr('timeoutId'));
-		startTimeout(alert, params.timeout);
+		clearTimeout(parseInt(alert.attr('timeoutId'), 10));
+		if (params.timeout) {
+			startTimeout(alert, params.timeout);
+		}
 
 		alert.children().fadeOut(100);
 		translator.translate(alert.html(), function(translatedHTML) {

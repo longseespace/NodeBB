@@ -5,6 +5,8 @@ var	async = require('async'),
 
 	db = require('../database'),
 	posts = require('../posts'),
+	plugins = require('../plugins'),
+	privileges = require('../privileges'),
 	meta = require('../meta'),
 	topics = require('../topics'),
 	favourites = require('../favourites'),
@@ -17,13 +19,7 @@ var	async = require('async'),
 	SocketPosts = {};
 
 
-
 SocketPosts.reply = function(socket, data, callback) {
-
-	if (!socket.uid && !parseInt(meta.config.allowGuestPosting, 10)) {
-		return callback(new Error('[[error:not-logged-in]]'));
-	}
-
 	if(!data || !data.tid || !data.content) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
@@ -32,25 +28,51 @@ SocketPosts.reply = function(socket, data, callback) {
 	data.req = websockets.reqFromSocket(socket);
 
 	topics.reply(data, function(err, postData) {
-		if(err) {
+		if (err) {
 			return callback(err);
 		}
 
-		if (postData) {
-			websockets.server.sockets.emit('event:new_post', {
-				posts: [postData]
+		var result = {
+			posts: [postData],
+			privileges: {
+				'topics:reply': true
+			},
+			'reputation:disabled': parseInt(meta.config['reputation:disabled'], 10) === 1,
+			'downvote:disabled': parseInt(meta.config['downvote:disabled'], 10) === 1,
+		};
+
+		callback();
+
+		socket.emit('event:new_post', result);
+
+		var uids = websockets.getConnectedClients();
+
+		privileges.categories.filterUids('read', postData.topic.cid, uids, function(err, uids) {
+			if (err) {
+				return;
+			}
+
+			plugins.fireHook('filter:sockets.sendNewPostToUids', {uidsTo: uids, uidFrom: data.uid, type: "newPost"}, function(err, data) {
+				uids = data.uidsTo;
+
+				for(var i=0; i<uids.length; ++i) {
+					if (parseInt(uids[i], 10) !== socket.uid) {
+						websockets.in('uid_' + uids[i]).emit('event:new_post', result);
+					}
+				}
 			});
+		});
 
-			module.parent.exports.emitTopicPostStats();
-
-			callback();
-		}
+		websockets.emitTopicPostStats();
 	});
 };
 
 SocketPosts.upvote = function(socket, data, callback) {
+	if (!data || !data.pid) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
 	favouriteCommand('upvote', 'voted', socket, data, callback);
-	sendNotificationToPostOwner(data, socket.uid, 'notifications:upvoted_your_post');
+	SocketPosts.sendNotificationToPostOwner(data.pid, socket.uid, 'notifications:upvoted_your_post_in');
 };
 
 SocketPosts.downvote = function(socket, data, callback) {
@@ -62,8 +84,11 @@ SocketPosts.unvote = function(socket, data, callback) {
 };
 
 SocketPosts.favourite = function(socket, data, callback) {
+	if (!data || !data.pid) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
 	favouriteCommand('favourite', 'favourited', socket, data, callback);
-	sendNotificationToPostOwner(data, socket.uid, 'notifications:favourited_your_post');
+	SocketPosts.sendNotificationToPostOwner(data.pid, socket.uid, 'notifications:favourited_your_post_in');
 };
 
 SocketPosts.unfavourite = function(socket, data, callback) {
@@ -71,7 +96,6 @@ SocketPosts.unfavourite = function(socket, data, callback) {
 };
 
 function favouriteCommand(command, eventName, socket, data, callback) {
-
 	if(data && data.pid && data.room_id) {
 		favourites[command](data.pid, socket.uid, function(err, result) {
 			if (err) {
@@ -88,64 +112,61 @@ function favouriteCommand(command, eventName, socket, data, callback) {
 	}
 }
 
-function sendNotificationToPostOwner(data, uid, notification) {
-	if(data && data.pid && uid) {
-		posts.getPostFields(data.pid, ['tid', 'uid'], function(err, postData) {
+SocketPosts.sendNotificationToPostOwner = function(pid, fromuid, notification) {
+	if(!pid || !fromuid) {
+		return;
+	}
+	posts.getPostFields(pid, ['tid', 'uid', 'content'], function(err, postData) {
+		if (err) {
+			return;
+		}
+
+		if (fromuid === parseInt(postData.uid, 10)) {
+			return;
+		}
+
+		async.parallel({
+			username: async.apply(user.getUserField, fromuid, 'username'),
+			topicTitle: async.apply(topics.getTopicField, postData.tid, 'title'),
+			postContent: async.apply(postTools.parse, postData.content)
+		}, function(err, results) {
 			if (err) {
 				return;
 			}
 
-			if (uid === parseInt(postData.uid, 10)) {
-				return;
-			}
-
-			async.parallel({
-				username: function(next) {
-					user.getUserField(uid, 'username', next);
-				},
-				slug: function(next) {
-					topics.getTopicField(postData.tid, 'slug', next);
+			notifications.create({
+				bodyShort: '[[' + notification + ', ' + results.username + ', ' + results.topicTitle + ']]',
+				bodyLong: results.postContent,
+				pid: pid,
+				nid: 'post:' + pid + ':uid:' + fromuid,
+				from: fromuid
+			}, function(err, notification) {
+				if (!err && notification) {
+					notifications.push(notification, [postData.uid]);
 				}
-			}, function(err, results) {
-				if (err) {
-					return;
-				}
-
-				notifications.create({
-					text: '[[' + notification + ', ' + results.username + ']]',
-					path: nconf.get('relative_path') + '/topic/' + results.slug + '#' + data.pid,
-					uniqueId: 'post:' + data.pid,
-					from: uid
-				}, function(nid) {
-					notifications.push(nid, [postData.uid]);
-				});
 			});
 		});
-	}
-}
+	});
+};
 
 SocketPosts.getRawPost = function(socket, pid, callback) {
 	async.waterfall([
 		function(next) {
-			postTools.privileges(pid, socket.uid, next);
+			privileges.posts.can('read', pid, socket.uid, next);
 		},
-		function(privileges, next) {
-			if (!privileges || !privileges.read) {
+		function(canRead, next) {
+			if (!canRead) {
 				return next(new Error('[[error:no-privileges]]'));
 			}
 			posts.getPostFields(pid, ['content', 'deleted'], next);
+		},
+		function(postData, next) {
+			if (parseInt(postData.deleted, 10) === 1) {
+				return next(new Error('[[error:no-post]]'));
+			}
+			next(null, postData.content);
 		}
-	], function(err, post) {
-		if(err) {
-			return callback(err);
-		}
-
-		if(parseInt(post.deleted, 10) === 1) {
-			return callback(new Error('[[error:no-post]]'));
-		}
-
-		callback(null, post.content);
-	});
+	], callback);
 };
 
 SocketPosts.edit = function(socket, data, callback) {
@@ -155,11 +176,13 @@ SocketPosts.edit = function(socket, data, callback) {
 		return callback(new Error('[[error:invalid-data]]'));
 	} else if (!data.title || data.title.length < parseInt(meta.config.minimumTitleLength, 10)) {
 		return callback(new Error('[[error:title-too-short, ' + meta.config.minimumTitleLength + ']]'));
+	} else if (data.title.length > parseInt(meta.config.maximumTitleLength, 10)) {
+		return callback(new Error('[[error:title-too-long, ' + meta.config.maximumTitleLength + ']]'));
 	} else if (!data.content || data.content.length < parseInt(meta.config.minimumPostLength, 10)) {
 		return callback(new Error('[[error:content-too-short, ' + meta.config.minimumPostLength + ']]'));
 	}
 
-	postTools.edit(socket.uid, data.pid, data.title, data.content, {topic_thumb: data.topic_thumb}, function(err, results) {
+	postTools.edit(socket.uid, data.pid, data.title, data.content, {topic_thumb: data.topic_thumb, tags: data.tags}, function(err, results) {
 		if(err) {
 			return callback(err);
 		}
@@ -168,6 +191,7 @@ SocketPosts.edit = function(socket, data, callback) {
 			pid: data.pid,
 			title: results.topic.title,
 			isMainPost: results.topic.isMainPost,
+			tags: results.topic.tags,
 			content: results.content
 		});
 
@@ -188,73 +212,67 @@ function deleteOrRestore(command, socket, data, callback) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
-	postTools[command](socket.uid, data.pid, function(err) {
+	postTools[command](socket.uid, data.pid, function(err, postData) {
 		if(err) {
 			return callback(err);
 		}
 
-		module.parent.exports.emitTopicPostStats();
+		websockets.emitTopicPostStats();
 
 		var eventName = command === 'restore' ? 'event:post_restored' : 'event:post_deleted';
-		websockets.server.sockets.in('topic_' + data.tid).emit(eventName, {
-			pid: data.pid
-		});
+		websockets.server.sockets.in('topic_' + data.tid).emit(eventName, postData);
 
 		callback();
 	});
 }
 
-SocketPosts.getPrivileges = function(socket, pid, callback) {
-	postTools.privileges(pid, socket.uid, function(err, privileges) {
+SocketPosts.purge = function(socket, data, callback) {
+	if(!data) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
+	postTools.purge(socket.uid, data.pid, function(err) {
 		if(err) {
 			return callback(err);
 		}
-		privileges.pid = parseInt(pid, 10);
+
+		websockets.emitTopicPostStats();
+
+		websockets.server.sockets.in('topic_' + data.tid).emit('event:post_purged', data.pid);
+
+		callback();
+	});
+};
+
+SocketPosts.getPrivileges = function(socket, pids, callback) {
+	privileges.posts.get(pids, socket.uid, function(err, privileges) {
+		if (err) {
+			return callback(err);
+		}
+		if (!Array.isArray(privileges) || !privileges.length) {
+			return callback(new Error('[[error:invalid-data]]'));
+		}
+
 		callback(null, privileges);
 	});
 };
 
-SocketPosts.getFavouritedUsers = function(socket, pid, callback) {
-
-	favourites.getFavouritedUidsByPids([pid], function(err, data) {
-
-		if(err) {
-			return callback(err);
+SocketPosts.getUpvoters = function(socket, pid, callback) {
+	favourites.getUpvotedUidsByPids([pid], function(err, data) {
+		if (err || !Array.isArray(data) || !data.length) {
+			return callback(err, []);
 		}
-
-		if(!Array.isArray(data) || !data.length) {
-			callback(null, "");
+		var otherCount = 0;
+		if (data[0].length > 6) {
+			otherCount = data[0].length - 5;
+			data[0] = data[0].slice(0, 5);
 		}
-
-		var max = 5; //hardcoded
-		var finalText = "";
-
-		var pid_uids = data[0];
-		var rest_amount = 0;
-
-		if (pid_uids.length > max) {
-			rest_amount = pid_uids.length - max;
-			pid_uids = pid_uids.slice(0, max);
-		}
-
-		user.getUsernamesByUids(pid_uids, function(err, usernames) {
-			if(err) {
-				return callback(err);
-			}
-
-			finalText = usernames.join(', ') + (rest_amount > 0 ?
-				(" and " + rest_amount + (rest_amount > 1 ? " others" : " other")) : "");
-			callback(null, finalText);
+		user.getUsernamesByUids(data[0], function(err, usernames) {
+			callback(err, {
+				otherCount: otherCount,
+				usernames: usernames
+			});
 		});
 	});
-};
-
-SocketPosts.getPidPage = function(socket, pid, callback) {
-	posts.getPidPage(pid, socket.uid, callback);
-};
-
-SocketPosts.getPidIndex = function(socket, pid, callback) {
-	posts.getPidIndex(pid, callback);
 };
 
 SocketPosts.flag = function(socket, pid, callback) {
@@ -263,36 +281,49 @@ SocketPosts.flag = function(socket, pid, callback) {
 	}
 
 	var message = '',
-		path = '',
+		userName = '',
 		post;
 
 	async.waterfall([
 		function(next) {
-			user.getUserField(socket.uid, 'username', next);
+			user.getUserFields(socket.uid, ['username', 'reputation'], next);
 		},
-		function(username, next) {
-			message = '[[notifications:user_flagged_post, ' + username + ']]';
-			posts.getPostFields(pid, ['tid', 'uid'], next);
+		function(userData, next) {
+			if (parseInt(userData.reputation, 10) < parseInt(meta.config['privileges:flag'] || 1, 10)) {
+				return next(new Error('[[error:not-enough-reputation-to-flag]]'));
+			}
+			userName = userData.username;
+
+			posts.getPostFields(pid, ['tid', 'uid', 'content'], next);
 		},
 		function(postData, next) {
 			post = postData;
-			topics.getTopicField(postData.tid, 'slug', next);
+			topics.getTopicField(postData.tid, 'title', next);
 		},
-		function(topicSlug, next) {
-			path = nconf.get('relative_path') + '/topic/' + topicSlug + '#' + pid;
+		function(topicTitle, next) {
+			message = '[[notifications:user_flagged_post_in, ' + userName + ', ' + topicTitle + ']]';
+			postTools.parse(post.content, next);
+		},
+		function(postContent, next) {
+			post.content = postContent;
 			groups.get('administrators', {}, next);
 		},
 		function(adminGroup, next) {
 			notifications.create({
-				text: message,
-				path: path,
-				uniqueId: 'post_flag:' + pid,
+				bodyShort: message,
+				bodyLong: post.content,
+				pid: pid,
+				nid: 'post_flag:' + pid + ':uid:' + socket.uid,
 				from: socket.uid
-			}, function(nid) {
-				notifications.push(nid, adminGroup.members, function() {
-					next();
-				});
+			}, function(err, notification) {
+				if (err || !notification) {
+					return next(err);
+				}
+				notifications.push(notification, adminGroup.members, next);
 			});
+		},
+		function(next) {
+			posts.flag(pid, next);
 		},
 		function(next) {
 			if (!parseInt(post.uid, 10)) {
@@ -353,6 +384,10 @@ SocketPosts.getRecentPosts = function(socket, data, callback) {
 
 SocketPosts.getCategory = function(socket, pid, callback) {
 	posts.getCidByPid(pid, callback);
+};
+
+SocketPosts.getPidIndex = function(socket, pid, callback) {
+	posts.getPidIndex(pid, socket.uid, callback);
 };
 
 module.exports = SocketPosts;

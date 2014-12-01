@@ -1,16 +1,15 @@
 "use strict";
 
-module.exports = function(redisClient, module) {	
+module.exports = function(redisClient, module) {
 	module.setObject = function(key, data, callback) {
-		// TODO: this crashes if callback isnt supplied -baris
-		redisClient.hmset(key, data, function(err, res) {
-			if(typeof callback === 'function') {
-				callback(err, res);
-			}
+		callback = callback || function() {};
+		redisClient.hmset(key, data, function(err) {
+			callback(err);
 		});
 	};
 
 	module.setObjectField = function(key, field, value, callback) {
+		callback = callback || function() {};
 		redisClient.hset(key, field, value, callback);
 	};
 
@@ -45,6 +44,9 @@ module.exports = function(redisClient, module) {
 	};
 
 	module.getObjectsFields = function(keys, fields, callback) {
+		if (!Array.isArray(fields) || !fields.length) {
+			return callback(null, keys.map(function() { return {}; }));
+		}
 		var	multi = redisClient.multi();
 
 		for(var x=0; x<keys.length; ++x) {

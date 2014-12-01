@@ -1,8 +1,10 @@
 var async = require('async'),
-
+	winston = require('winston'),
 	db = require('./database'),
 	posts = require('./posts'),
-	user = require('./user');
+	user = require('./user'),
+	plugins = require('./plugins'),
+	meta = require('./meta');
 
 (function (Favourites) {
 	"use strict";
@@ -42,6 +44,10 @@ var async = require('async'),
 
 				db.sortedSetAdd('users:reputation', newreputation, postData.uid);
 
+				if (type === 'downvote') {
+					banUserForLowReputation(postData.uid, newreputation);
+				}
+
 				adjustPostVotes(pid, uid, type, unvote, function(err, votes) {
 					postData.votes = votes;
 					callback(err, {
@@ -55,6 +61,23 @@ var async = require('async'),
 				});
 			});
 		});
+	}
+
+	function banUserForLowReputation(uid, newreputation) {
+		if (parseInt(meta.config['autoban:downvote'], 10) === 1 && newreputation < parseInt(meta.config['autoban:downvote:threshold'], 10)) {
+			user.getUserField(uid, 'banned', function(err, banned) {
+				if (err || parseInt(banned, 10) === 1) {
+					return;
+				}
+				var adminUser = require('./socket.io/admin/user');
+				adminUser.banUser(uid, function(err) {
+					if (err) {
+						return winston.error(err.message);
+					}
+					winston.info('uid ' + uid + ' was banned for reaching ' + newreputation + ' reputation');
+				});
+			});
+		}
 	}
 
 	function adjustPostVotes(pid, uid, type, unvote, callback) {
@@ -88,7 +111,8 @@ var async = require('async'),
 					return callback(err);
 				}
 				var voteCount = parseInt(results.upvotes, 10) - parseInt(results.downvotes, 10);
-				posts.setPostField(pid, 'votes', voteCount, function(err) {
+
+				posts.updatePostVoteCount(pid, voteCount, function(err) {
 					callback(err, voteCount);
 				});
 			});
@@ -96,11 +120,52 @@ var async = require('async'),
 	}
 
 	Favourites.upvote = function(pid, uid, callback) {
-		toggleVote('upvote', pid, uid, callback);
+		if (parseInt(meta.config['reputation:disabled'], 10) === 1) {
+			return callback(new Error('[[error:reputation-system-disabled]]'));
+		}
+
+		toggleVote('upvote', pid, uid, function(err, votes) {
+			if (err) {
+				return callback(err);
+			}
+			plugins.fireHook('action:post.upvote', {
+				pid: pid,
+				uid: uid
+			});
+
+			callback(null, votes);
+		});
 	};
 
 	Favourites.downvote = function(pid, uid, callback) {
-		toggleVote('downvote', pid, uid, callback);
+		if (parseInt(meta.config['reputation:disabled'], 10) === 1) {
+			return callback(new Error('[[error:reputation-system-disabled]]'));
+		}
+
+		if (parseInt(meta.config['downvote:disabled'], 10) === 1) {
+			return callback(new Error('[[error:downvoting-disabled]]'));
+		}
+
+		user.getUserField(uid, 'reputation', function(err, reputation) {
+			if (err) {
+				return callback(err);
+			}
+
+			if (reputation < parseInt(meta.config['privileges:downvote'], 10)) {
+				return callback(new Error('[[error:not-enough-reputation-to-downvote]]'));
+			}
+
+			toggleVote('downvote', pid, uid, function(err, votes) {
+				if (err) {
+					return callback(err);
+				}
+				plugins.fireHook('action:post.downvote', {
+					pid: pid,
+					uid: uid
+				});
+				callback(null, votes);
+			});
+		});
 	};
 
 	function toggleVote(type, pid, uid, callback) {
@@ -128,19 +193,31 @@ var async = require('async'),
 	};
 
 	Favourites.hasVoted = function(pid, uid, callback) {
-		async.parallel({
-			upvoted: function(next) {
-				db.isSetMember('pid:' + pid + ':upvote', uid, next);
-			},
-			downvoted: function(next) {
-				db.isSetMember('pid:' + pid + ':downvote', uid, next);
+		db.isMemberOfSets(['pid:' + pid + ':upvote', 'pid:' + pid + ':downvote'], uid, function(err, hasVoted) {
+			if (err) {
+				return callback(err);
 			}
-		}, callback);
+
+			callback (null, {upvoted: hasVoted[0], downvoted: hasVoted[1]});
+		});
 	};
 
 	Favourites.getVoteStatusByPostIDs = function(pids, uid, callback) {
-		async.map(pids, function(pid, next) {
-			Favourites.hasVoted(pid, uid, next);
+		var upvoteSets = [],
+			downvoteSets = [];
+
+		for (var i=0; i<pids.length; ++i) {
+			upvoteSets.push('pid:' + pids[i] + ':upvote');
+			downvoteSets.push('pid:' + pids[i] + ':downvote');
+		}
+
+		async.parallel({
+			upvotes: function(next) {
+				db.isMemberOfSets(upvoteSets, uid, next);
+			},
+			downvotes: function(next) {
+				db.isMemberOfSets(downvoteSets, uid, next);
+			}
 		}, callback);
 	};
 
@@ -209,15 +286,27 @@ var async = require('async'),
 	};
 
 	Favourites.getFavouritesByPostIDs = function(pids, uid, callback) {
-		async.map(pids, function(pid, next) {
-			Favourites.hasFavourited(pid, uid, next);
-		}, callback);
+		var sets = [];
+		for (var i=0; i<pids.length; ++i) {
+			sets.push('pid:' + pids[i] + ':users_favourited');
+		}
+
+		db.isMemberOfSets(sets, uid, callback);
 	};
 
 	Favourites.getFavouritedUidsByPids = function(pids, callback) {
-		async.map(pids, function(pid, next) {
-			db.getSetMembers('pid:' + pid + ':users_favourited', next);
-		}, callback);
+		var sets = pids.map(function(pid) {
+			return 'pid:' + pid + ':users_favourited';
+		});
+		db.getSetsMembers(sets, callback);
 	};
+
+	Favourites.getUpvotedUidsByPids = function(pids, callback) {
+		var sets = pids.map(function(pid) {
+			return 'pid:' + pid + ':upvote';
+		});
+		db.getSetsMembers(sets, callback);
+	};
+
 
 }(exports));

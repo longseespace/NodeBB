@@ -1,5 +1,5 @@
 "use strict";
-/*global io, templates, translator, ajaxify, utils, RELATIVE_PATH*/
+/*global io, templates, translator, ajaxify, utils, bootbox, RELATIVE_PATH*/
 
 var socket,
 	config,
@@ -7,8 +7,10 @@ var socket,
 		'username': null,
 		'uid': null,
 		'isFocused': true,
+		'isConnected': false,
 		'currentRoom': null,
-		'widgets': {}
+		'widgets': {},
+		'cacheBuster': null
 	};
 
 (function () {
@@ -24,7 +26,7 @@ var socket,
 			reconnecting = false;
 
 			// Rejoin room that was left when we disconnected
-			var	url_parts = document.location.pathname.slice(RELATIVE_PATH.length).split('/').slice(1);
+			var	url_parts = window.location.pathname.slice(RELATIVE_PATH.length).split('/').slice(1);
 			var room;
 
 			switch(url_parts[0]) {
@@ -44,14 +46,16 @@ var socket,
 				case 'admin':
 					room = 'admin';
 				break;
-				default:
-					room = 'global';
+				case 'home':
+					room = 'home';
 				break;
 			}
-
-			app.enterRoom(room, true);
+			app.currentRoom = '';
+			app.enterRoom(room);
 
 			socket.emit('meta.reconnected');
+
+			app.isConnected = true;
 			$(window).trigger('action:reconnected');
 
 			setTimeout(function() {
@@ -81,20 +85,22 @@ var socket,
 				ioParams.transports = ['xhr-polling'];
 			}
 
-			socket = io.connect('', ioParams);
+			socket = io.connect(config.websocketAddress, ioParams);
 			reconnecting = false;
 
 			socket.on('event:connect', function (data) {
 				app.username = data.username;
 				app.userslug = data.userslug;
+				app.picture = data.picture;
 				app.uid = data.uid;
 				app.isAdmin = data.isAdmin;
 
 				templates.setGlobal('loggedIn', parseInt(data.uid, 10) !== 0);
 
 				app.showLoginMessage();
-
+				app.replaceSelfLinks();
 				$(window).trigger('action:connected');
+				app.isConnected = true;
 			});
 
 			socket.on('event:alert', function (data) {
@@ -105,6 +111,7 @@ var socket,
 
 			socket.on('event:disconnect', function() {
 				$(window).trigger('action:disconnected');
+				app.isConnected = false;
 				socket.socket.connect();
 			});
 
@@ -131,22 +138,20 @@ var socket,
 				app.alert({
 					title: '[[global:alert.banned]]',
 					message: '[[global:alert.banned.message]]',
-					type: 'warning',
+					type: 'danger',
 					timeout: 1000
 				});
 
-				setTimeout(app.logout, 1000);
+				setTimeout(function() {
+					window.location.href = RELATIVE_PATH + '/';
+				}, 1000);
 			});
 
-			app.enterRoom('global');
+			app.cacheBuster = config['cache-buster'];
 
-			if (config.environment === 'development' && console && console.log) {
-				var log = console.log;
-				console.log = function() {
-					log.apply(this, arguments);
-					socket.emit('tools.log', arguments);
-				};
-			}
+			bootbox.setDefaults({
+				locale: config.userLang
+			});
 		}
 	}
 
@@ -159,9 +164,7 @@ var socket,
 	};
 
 	app.logout = function() {
-		$.post(RELATIVE_PATH + '/logout', {
-			_csrf: $('#csrf_token').val()
-		}, function() {
+		$.post(RELATIVE_PATH + '/logout', function() {
 			window.location.href = RELATIVE_PATH + '/';
 		});
 	};
@@ -196,47 +199,22 @@ var socket,
 		});
 	};
 
-	app.enterRoom = function (room, force) {
+	app.enterRoom = function (room) {
 		if (socket) {
-			if (app.currentRoom === room && !force) {
+			if (app.currentRoom === room) {
 				return;
 			}
 
 			socket.emit('meta.rooms.enter', {
-				'enter': room,
-				'leave': app.currentRoom
+				enter: room,
+				leave: app.currentRoom,
+				username: app.username,
+				userslug: app.userslug,
+				picture: app.picture
 			});
 
 			app.currentRoom = room;
 		}
-	};
-
-	app.populateOnlineUsers = function () {
-		var uids = [];
-
-		$('.post-row').each(function () {
-			var uid = $(this).attr('data-uid');
-			if(uids.indexOf(uid) === -1) {
-				uids.push(uid);
-			}
-		});
-
-		socket.emit('user.getOnlineUsers', uids, function (err, users) {
-
-			$('.username-field').each(function (index, element) {
-				var el = $(this),
-					uid = el.parents('li').attr('data-uid');
-
-				if (uid && users[uid]) {
-					translator.translate('[[global:' + users[uid].status + ']]', function(translated) {
-						el.siblings('i')
-							.attr('class', 'fa fa-circle status ' + users[uid].status)
-							.attr('title', translated)
-							.attr('data-original-title', translated);
-					});
-				}
-			});
-		});
 	};
 
 	function highlightNavigationLink() {
@@ -287,12 +265,9 @@ var socket,
 	};
 
 	app.processPage = function () {
-		app.populateOnlineUsers();
-
 		highlightNavigationLink();
 
 		$('span.timeago').timeago();
-		$('.post-content img').addClass('img-responsive');
 
 		utils.makeNumbersHumanReadable($('.human-readable-number'));
 
@@ -352,24 +327,6 @@ var socket,
 		});
 	};
 
-	var previousScrollTop = 0;
-
-	app.enableInfiniteLoading = function(callback) {
-		$(window).on('scroll', function() {
-
-			var top = $(window).height() * 0.1;
-			var bottom = ($(document).height() - $(window).height()) * 0.9;
-			var currentScrollTop = $(window).scrollTop();
-
-			if(currentScrollTop < top && currentScrollTop < previousScrollTop) {
-				callback(-1);
-			} else if (currentScrollTop > bottom && currentScrollTop > previousScrollTop) {
-				callback(1);
-			}
-			previousScrollTop = currentScrollTop;
-		});
-	};
-
 	var	titleObj = {
 			active: false,
 			interval: undefined,
@@ -422,11 +379,12 @@ var socket,
 		});
 	};
 
-	function updateOnlineStatus(uid) {
-		socket.emit('user.isOnline', uid, function(err, data) {
-			$('#logged-in-menu #user_label #user-profile-link>i').attr('class', 'fa fa-circle status ' + data.status);
-		});
-	}
+	app.toggleNavbar = function(state) {
+		var navbarEl = $('.navbar');
+		if (navbarEl) {
+			navbarEl.toggleClass('hidden', !!!state);
+		}
+	};
 
 	function exposeConfigToTemplates() {
 		$(document).ready(function() {
@@ -440,8 +398,11 @@ var socket,
 	}
 
 	function createHeaderTooltips() {
-		$('#header-menu li i[title]').each(function() {
-			$(this).parents('a').tooltip({
+		if (utils.findBootstrapEnvironment() === 'xs') {
+			return;
+		}
+		$('#header-menu li [title]').each(function() {
+			$(this).tooltip({
 				placement: 'bottom',
 				title: $(this).attr('title')
 			});
@@ -463,29 +424,66 @@ var socket,
 			searchFields = $("#search-fields"),
 			searchInput = $('#search-fields input');
 
+		$('#search-form').on('submit', dismissSearch);
+		searchInput.on('blur', dismissSearch);
+
 		function dismissSearch(){
 			searchFields.hide();
 			searchButton.show();
 		}
 
-		searchButton.off().on('click', function(e) {
+		function prepareSearch() {
+			searchFields.removeClass('hide').show();
+			searchButton.hide();
+			searchInput.focus();
+		}
+
+		searchButton.on('click', function(e) {
+			if (!config.loggedIn && !config.allowGuestSearching) {
+				app.alert({
+					message:'[[error:search-requires-login]]',
+					timeout: 3000
+				});
+				ajaxify.go('login');
+				return false;
+			}
 			e.stopPropagation();
 
-			searchFields.removeClass('hide').show();
-			$(this).hide();
-
-			searchInput.focus();
-
-			$('#search-form').on('submit', dismissSearch);
-			searchInput.on('blur', dismissSearch);
+			prepareSearch();
 			return false;
 		});
 
-		$('#search-form').on('submit', function () {
-			var input = $(this).find('input');
-			ajaxify.go('search/' + input.val().replace(/^[ ?#]*/, ''));
-			input.val('');
-			return false;
+		require(['search', 'mousetrap'], function(search, Mousetrap) {
+			$('#search-form').on('submit', function (e) {
+				e.preventDefault();
+				var input = $(this).find('input'),
+					term = input.val();
+
+
+				search.query(term, function() {
+					input.val('');
+				});
+			});
+
+			$('.topic-search')
+				.on('click', '.prev', function() {
+					search.topicDOM.prev();
+				})
+				.on('click', '.next', function() {
+					search.topicDOM.next();
+				});
+
+			Mousetrap.bind('ctrl+f', function(e) {
+				// If in topic, open search window and populate, otherwise regular behaviour
+				var match = ajaxify.currentPage.match(/^topic\/([\d]+)/),
+					tid;
+				if (match) {
+					e.preventDefault();
+					tid = match[1];
+					searchInput.val('in:topic-' + tid + ' ');
+					prepareSearch();
+				}
+			});
 		});
 	}
 
@@ -499,11 +497,12 @@ var socket,
 
 	function handleStatusChange() {
 		$('#user-control-list .user-status').off('click').on('click', function(e) {
-			socket.emit('user.setStatus', $(this).attr('data-status'), function(err, data) {
+			var status = $(this).attr('data-status');
+			socket.emit('user.setStatus', status, function(err, data) {
 				if(err) {
 					return app.alertError(err.message);
 				}
-				updateOnlineStatus(data.uid);
+				$('#logged-in-menu #user_label #user-profile-link>i').attr('class', 'fa fa-circle status ' + status);
 			});
 			e.preventDefault();
 		});
@@ -511,16 +510,14 @@ var socket,
 
 	app.load = function() {
 		$('document').ready(function () {
-			var url = window.location.pathname.slice(1),
-				tpl_url = ajaxify.getTemplateMapping(url);
+			var url = ajaxify.removeRelativePath(window.location.pathname.slice(1).replace(/\/$/, "")),
+				tpl_url = ajaxify.getTemplateMapping(url),
+				search = window.location.search,
+				hash = window.location.hash,
+				$window = $(window);
 
-			url = url.replace(/\/$/, "");
 
-			if (url.indexOf(RELATIVE_PATH.slice(1)) !== -1) {
-				url = url.slice(RELATIVE_PATH.length);
-			}
-
-			$(window).trigger('action:ajaxify.start', {
+			$window.trigger('action:ajaxify.start', {
 				url: url
 			});
 
@@ -532,39 +529,65 @@ var socket,
 
 			$('#logout-link').on('click', app.logout);
 
-			$(window).blur(function(){
-				app.isFocused = false;
-			});
-
-			$(window).focus(function(){
-				app.isFocused = true;
-				app.alternatingTitle('');
+			Visibility.change(function(e, state){
+				if (state === 'visible') {
+					app.isFocused = true;
+					app.alternatingTitle('');
+				} else if (state === 'hidden') {
+					app.isFocused = false;
+				}
 			});
 
 			createHeaderTooltips();
 			ajaxify.variables.parse();
 			ajaxify.currentPage = url;
-			app.processPage();
 
-			ajaxify.widgets.render(tpl_url, url);
+			$window.trigger('action:ajaxify.contentLoaded', {
+				url: url
+			});
 
 			if (window.history && window.history.replaceState) {
-				var hash = window.location.hash ? window.location.hash : '';
 				window.history.replaceState({
-					url: url + hash
-				}, url, RELATIVE_PATH + '/' + url + hash);
+					url: url + search + hash
+				}, url, RELATIVE_PATH + '/' + url + search + hash);
 			}
 
 			ajaxify.loadScript(tpl_url, function() {
-				$(window).trigger('action:ajaxify.end', {
-					url: url
+				ajaxify.widgets.render(tpl_url, url, function() {
+					app.processPage();
+					$window.trigger('action:ajaxify.end', {
+						url: url
+					});
 				});
+			});
+
+			socket.removeAllListeners('event:nodebb.ready');
+			socket.on('event:nodebb.ready', function(cacheBusters) {
+				if (
+					!app.cacheBusters ||
+					app.cacheBusters.general !== cacheBusters.general ||
+					app.cacheBusters.css !== cacheBusters.css ||
+					app.cacheBusters.js !== cacheBusters.js
+				) {
+					app.cacheBusters = cacheBusters;
+
+					app.alert({
+						alert_id: 'forum_updated',
+						title: '[[global:updated.title]]',
+						message: '[[global:updated.message]]',
+						clickfn: function() {
+							window.location.reload();
+						},
+						type: 'warning'
+					});
+				}
 			});
 		});
 	};
 
-	showWelcomeMessage = location.href.indexOf('loggedin') !== -1;
+	showWelcomeMessage = window.location.href.indexOf('loggedin') !== -1;
 
 	app.loadConfig();
 	app.alternatingTitle('');
+
 }());

@@ -3,5 +3,7 @@
     "day": "Día",
     "week": "Semana",
     "month": "Mes",
+    "year": "Año",
+    "alltime": "Siempre",
     "no_recent_topics": "No hay publicaciones recientes"
 }

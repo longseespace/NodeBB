@@ -2,22 +2,12 @@
 
 var helpers = {};
 
-helpers.findItem = function(data, key) {
-	if(!data) {
-		return null;
+helpers.toMap = function(data) {
+	var map = {};
+	for (var i = 0; i<data.length; ++i) {
+		map[data[i]._key] = data[i];
 	}
-
-	for(var i=0; i<data.length; ++i) {
-		if(data[i]._key === key) {
-			var item = data.splice(i, 1);
-			if(item && item.length) {
-				return item[0];
-			} else {
-				return null;
-			}
-		}
-	}
-	return null;
+	return map;
 };
 
 helpers.fieldToString = function(field) {
@@ -41,12 +31,6 @@ helpers.valueToString = function(value) {
 	return value.toString();
 };
 
-helpers.done = function(cb) {
-	return function(err, result) {
-		if (typeof cb === 'function') {
-			cb(err, result);
-		}
-	};
-};
+helpers.noop = function() {};
 
 module.exports = helpers;

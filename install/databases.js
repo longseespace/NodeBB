@@ -12,7 +12,7 @@ function success(err, config, callback) {
 		return callback(new Error('aborted'));
 	}
 
-	var database = (config.redis || config.mongo || config.level) ? config.secondary_database : config.database;
+	var database = (config.redis || config.mongo) ? config.secondary_database : config.database;
 
 	function dbQuestionsSuccess(err, databaseConfig) {
 		if (!databaseConfig) {
@@ -39,15 +39,11 @@ function success(err, config, callback) {
 				password: databaseConfig['mongo:password'],
 				database: databaseConfig['mongo:database']
 			};
-		} else if (database === 'level') {
-			config.level = {
-				database: databaseConfig['level:database']
-			};
 		} else {
 			return callback(new Error('unknown database : ' + database));
 		}
 
-		var allQuestions = questions.redis.concat(questions.mongo.concat(questions.level));
+		var allQuestions = questions.redis.concat(questions.mongo);
 		for(var x=0;x<allQuestions.length;x++) {
 			delete config[allQuestions[x].name];
 		}
@@ -67,12 +63,6 @@ function success(err, config, callback) {
 		} else {
 			prompt.get(questions.mongo, dbQuestionsSuccess);
 		}
-	} else if(database === 'level') {
-		if (config['level:database']) {
-			dbQuestionsSuccess(null, config);
-		} else {
-			prompt.get(questions.level, dbQuestionsSuccess);
-		}
 	} else {
 		return callback(new Error('unknown database : ' + database));
 	}
@@ -91,19 +81,20 @@ function getSecondaryDatabaseModules(config, next) {
 
 module.exports = function(err, config, databases, callback) {
 	var allowedDBs = Object.keys(databases);
-	
+
 	allowedDBs.forEach(function(db) {
 		questions[db] = require('./../src/database/' + db).questions;
 	});
 
 	async.waterfall([
 		function(next) {
+			process.stdout.write('\n');
 			winston.info('Now configuring ' + config.database + ' database:');
 			success(err, config, next);
 		},
 		function(config, next) {
-			winston.info('Now configuring ' + config.secondary_database + ' database:');
 			if (config.secondary_database && allowedDBs.indexOf(config.secondary_database) !== -1) {
+				winston.info('Now configuring ' + config.secondary_database + ' database:');
 				getSecondaryDatabaseModules(config, next);
 			} else {
 				next(err, config);

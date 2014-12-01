@@ -2,11 +2,37 @@
 
 module.exports = function(redisClient, module) {
 	module.setAdd = function(key, value, callback) {
-		redisClient.sadd(key, value, callback);
+		callback = callback || function() {};
+		redisClient.sadd(key, value, function(err) {
+			callback(err);
+		});
+	};
+
+	module.setsAdd = function(keys, value, callback) {
+		callback = callback || function() {};
+		var multi = redisClient.multi();
+		for (var i=0; i<keys.length; ++i) {
+			multi.sadd(keys[i], value);
+		}
+		multi.exec(function(err) {
+			callback(err);
+		});
 	};
 
 	module.setRemove = function(key, value, callback) {
 		redisClient.srem(key, value, callback);
+	};
+
+	module.setsRemove = function(keys, value, callback) {
+		callback = callback || function() {};
+
+		var multi = redisClient.multi();
+		for(var i=0; i<keys.length; ++i) {
+			multi.srem(keys[i], value);
+		}
+		multi.exec(function(err, res) {
+			callback(err);
+		});
 	};
 
 	module.isSetMember = function(key, value, callback) {
@@ -25,6 +51,19 @@ module.exports = function(redisClient, module) {
 			multi.sismember(key, values[i]);
 		}
 
+		execSetMembers(multi, callback);
+	};
+
+	module.isMemberOfSets = function(sets, value, callback) {
+		var multi = redisClient.multi();
+		for (var i = 0; i < sets.length; ++i) {
+			multi.sismember(sets[i], value);
+		}
+
+		execSetMembers(multi, callback);
+	};
+
+	function execSetMembers(multi, callback) {
 		multi.exec(function(err, results) {
 			if (err) {
 				return callback(err);
@@ -35,20 +74,18 @@ module.exports = function(redisClient, module) {
 			}
 			callback(null, results);
 		});
-	};
-
-	module.isMemberOfSets = function(sets, value, callback) {
-		var multi = redisClient.multi();
-
-		for (var i = 0, ii = sets.length; i < ii; i++) {
-			multi.sismember(sets[i], value);
-		}
-
-		multi.exec(callback);
-	};
+	}
 
 	module.getSetMembers = function(key, callback) {
 		redisClient.smembers(key, callback);
+	};
+
+	module.getSetsMembers = function(keys, callback) {
+		var multi = redisClient.multi();
+		for (var i=0; i<keys.length; ++i) {
+			multi.smembers(keys[i]);
+		}
+		multi.exec(callback);
 	};
 
 	module.setCount = function(key, callback) {

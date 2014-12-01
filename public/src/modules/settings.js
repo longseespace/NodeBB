@@ -1,7 +1,7 @@
 "use strict";
 /*global define, app, socket*/
 
-define(function () {
+define('settings', function () {
 
 	var DEFAULT_PLUGINS = [
 		'settings/checkbox',
@@ -298,6 +298,7 @@ define(function () {
 						app.alert({
 							title: 'Settings Saved',
 							type: 'success',
+							message: "Settings have been successfully saved",
 							timeout: 2500
 						});
 					}
@@ -448,17 +449,18 @@ define(function () {
 			helper.persistSettings(hash, Settings.cfg, notify, callback);
 		},
 		load: function (hash, formEl, callback) {
+			callback = callback || function() {};
 			socket.emit('admin.settings.get', {
 				hash: hash
 			}, function (err, values) {
-				if (!err) {
-					$(formEl).deserialize(values);
-					if (typeof callback === 'function') {
-						callback();
-					}
-				} else {
+				if (err) {
 					console.log('[settings] Unable to load settings for hash: ', hash);
+					return callback(err);
 				}
+
+				$(formEl).deserialize(values);
+
+				callback(null, values);
 			});
 		},
 		save: function (hash, formEl, callback) {
@@ -476,13 +478,14 @@ define(function () {
 					hash: hash,
 					values: values
 				}, function (err) {
-					app.alert({
-						title: 'Settings Saved',
-						type: 'success',
-						timeout: 2500
-					});
 					if (typeof callback === 'function') {
 						callback();
+					} else {
+						app.alert({
+							title: 'Settings Saved',
+							type: 'success',
+							timeout: 2500
+						});
 					}
 				});
 			} else {

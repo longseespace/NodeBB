@@ -1,15 +1,33 @@
 'use strict';
 
 var	async = require('async'),
+	nconf = require('nconf'),
 	user = require('../user'),
+	groups = require('../groups'),
 	topics = require('../topics'),
-	utils = require('./../../public/src/utils'),
+	posts = require('../posts'),
+	notifications = require('../notifications'),
+	messaging = require('../messaging'),
+	plugins = require('../plugins'),
+	utils = require('../../public/src/utils'),
+	websockets = require('./index'),
 	meta = require('../meta'),
 	SocketUser = {};
 
 SocketUser.exists = function(socket, data, callback) {
 	if (data && data.username) {
-		user.exists(utils.slugify(data.username), callback);
+		meta.userOrGroupExists(utils.slugify(data.username), callback);
+	}
+};
+
+SocketUser.deleteAccount = function(socket, data, callback) {
+	if (socket.uid) {
+		user.isAdministrator(socket.uid, function(err, isAdmin) {
+			if (err || isAdmin) {
+				return callback(err || new Error('[[error:cant-delete-admin]]'));
+			}
+			user.deleteAccount(socket.uid, callback);
+		});
 	}
 };
 
@@ -23,7 +41,35 @@ SocketUser.emailExists = function(socket, data, callback) {
 	}
 };
 
+SocketUser.emailConfirm = function(socket, data, callback) {
+	if (socket.uid && parseInt(meta.config.requireEmailConfirmation, 10) === 1) {
+		user.getUserField(socket.uid, 'email', function(err, email) {
+			if (err) {
+				return callback(err);
+			}
+
+			if (!email) {
+				return;
+			}
+
+			user.email.verify(socket.uid, email);
+			callback();
+		});
+	}
+};
+
+SocketUser.increaseViewCount = function(socket, uid, callback) {
+	if (uid) {
+		if (socket.uid !== parseInt(uid, 10)) {
+			user.incrementUserFieldBy(uid, 'profileviews', 1, callback);
+		}
+	}
+};
+
 SocketUser.search = function(socket, username, callback) {
+	if (!socket.uid) {
+		return callback(new Error('[[error:not-logged-in]]'));
+	}
 	user.search(username, callback);
 };
 
@@ -48,8 +94,21 @@ SocketUser.reset.commit = function(socket, data, callback) {
 	}
 };
 
-SocketUser.isOnline = function(socket, uid, callback) {
-	user.isOnline(uid, callback);
+SocketUser.checkStatus = function(socket, uid, callback) {
+	if (!socket.uid) {
+		return callback('[[error:invalid-uid]]');
+	}
+	var online = websockets.isUserOnline(uid);
+	if (!online) {
+		return callback(null, 'offline');
+	}
+	user.getUserField(uid, 'status', function(err, status) {
+		if (err) {
+			return callback(err);
+		}
+		status = status || 'online';
+		callback(null, status);
+	});
 };
 
 SocketUser.changePassword = function(socket, data, callback) {
@@ -110,7 +169,6 @@ SocketUser.changePicture = function(socket, data, callback) {
 			if(err) {
 				return callback(err);
 			}
-
 		});
 		return;
 	}
@@ -128,49 +186,118 @@ SocketUser.changePicture = function(socket, data, callback) {
 	});
 };
 
-SocketUser.follow = function(socket, data, callback) {
-	if (socket.uid && data) {
-		user.follow(socket.uid, data.uid, callback);
+SocketUser.uploadProfileImageFromUrl = function(socket, url, callback) {
+	if (!socket.uid || !url) {
+		return;
 	}
+
+	plugins.fireHook('filter:uploadImage', {url: url}, function(err, image) {
+		if (err) {
+			return callback(err);
+		}
+
+		user.setUserFields(socket.uid, {uploadedpicture: image.url, picture: image.url}, function(err) {
+			callback(err, image.url);
+		});
+	});
+};
+
+SocketUser.follow = function(socket, data, callback) {
+	if (!socket.uid || !data) {
+		return;
+	}
+
+	toggleFollow('follow', socket.uid, data.uid, function(err) {
+		if (err) {
+			return callback(err);
+		}
+
+		user.getUserFields(socket.uid, ['username', 'userslug'], function(err, userData) {
+			if (err) {
+				return callback(err);
+			}
+
+			notifications.create({
+				bodyShort: '[[notifications:user_started_following_you, ' + userData.username + ']]',
+				path: nconf.get('relative_path') + '/user/' + userData.userslug,
+				nid: 'follow:' + data.uid + ':uid:' + socket.uid,
+				from: socket.uid
+			}, function(err, notification) {
+				if (!err && notification) {
+					notifications.push(notification, [data.uid]);
+				}
+				callback(err);
+			});
+		});
+	});
 };
 
 SocketUser.unfollow = function(socket, data, callback) {
 	if (socket.uid && data) {
-		user.unfollow(socket.uid, data.uid, callback);
+		toggleFollow('unfollow', socket.uid, data.uid, callback);
 	}
 };
 
+function toggleFollow(method, uid, theiruid, callback) {
+	user[method](uid, theiruid, function(err) {
+		if (err) {
+			return callback(err);
+		}
+
+		plugins.fireHook('action:user.' + method, {
+			fromUid: uid,
+			toUid: theiruid
+		});
+		callback();
+	});
+}
+
 SocketUser.getSettings = function(socket, data, callback) {
 	if (socket.uid) {
-		user.getSettings(socket.uid, callback);
+		if (socket.uid === parseInt(data.uid, 10)) {
+			return user.getSettings(socket.uid, callback);
+		}
+
+		user.isAdministrator(socket.uid, function(err, isAdmin) {
+			if (err) {
+				return callback(err);
+			}
+
+			if (!isAdmin) {
+				return callback(new Error('[[error:no-privileges]]'));
+			}
+
+			user.getSettings(data.uid, callback);
+		});
 	}
 };
 
 SocketUser.saveSettings = function(socket, data, callback) {
-	if (socket.uid && data) {
-		user.saveSettings(socket.uid, data, callback);
-	}
-};
-
-SocketUser.getOnlineUsers = function(socket, data, callback) {
-	var returnData = {};
-	if(!data) {
+	if (!socket.uid || !data) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
-	function getUserStatus(uid, next) {
-		SocketUser.isOnline(socket, uid, function(err, data) {
-			if(err) {
-				return next(err);
-			}
-			returnData[uid] = data;
-			next();
-		});
+	if (socket.uid === parseInt(data.uid, 10)) {
+		return user.saveSettings(socket.uid, data.settings, callback);
 	}
 
-	async.each(data, getUserStatus, function(err) {
-		callback(err, returnData);
+	user.isAdministrator(socket.uid, function(err, isAdmin) {
+		if (err) {
+			return callback(err);
+		}
+
+		if (!isAdmin) {
+			return callback(new Error('[[error:no-privileges]]'));
+		}
+
+		user.saveSettings(data.uid, data.settings, callback);
 	});
+};
+
+SocketUser.setTopicSort = function(socket, sort, callback) {
+	if (socket.uid) {
+		user.setSetting(socket.uid, 'topicPostSort', sort, callback);
+	}
 };
 
 SocketUser.getOnlineAnonCount = function(socket, data, callback) {
@@ -179,6 +306,10 @@ SocketUser.getOnlineAnonCount = function(socket, data, callback) {
 
 SocketUser.getUnreadCount = function(socket, data, callback) {
 	topics.getTotalUnread(socket.uid, callback);
+};
+
+SocketUser.getUnreadChatCount = function(socket, data, callback) {
+	messaging.getUnreadCount(socket.uid, callback);
 };
 
 SocketUser.getActiveUsers = function(socket, data, callback) {
@@ -220,14 +351,36 @@ SocketUser.loadMore = function(socket, data, callback) {
 	});
 };
 
+SocketUser.loadMoreRecentPosts = function(socket, data, callback) {
+	if(!data || !data.uid || !utils.isNumber(data.after)) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
+
+	var start = Math.max(0, parseInt(data.after, 10)),
+		end = start + 9;
+
+	posts.getPostsByUid(socket.uid, data.uid, start, end, callback);
+};
 
 SocketUser.setStatus = function(socket, status, callback) {
-	var server = require('./index');
+	if (!socket.uid) {
+		return callback(new Error('[[invalid-uid]]'));
+	}
+
+	var allowedStatus = ['online', 'offline', 'dnd', 'away'];
+	if (allowedStatus.indexOf(status) === -1) {
+		return callback(new Error('[[invalid-user-status]]'));
+	}
 	user.setUserField(socket.uid, 'status', status, function(err) {
-		SocketUser.isOnline(socket, socket.uid, function(err, data) {
-			server.server.sockets.emit('user.isOnline', err, data);
-			callback(err, data);
-		});
+		if (err) {
+			return callback(err);
+		}
+		var data = {
+			uid: socket.uid,
+			status: status
+		};
+		websockets.server.sockets.emit('event:user_status_change', data);
+		callback(null, data);
 	});
 };
 

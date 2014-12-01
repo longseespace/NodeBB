@@ -1,66 +1,64 @@
 "use strict";
 
-var	groups = require('../groups'),
+var	async = require('async'),
+	winston = require('winston'),
+	cluster = require('cluster'),
+	fs = require('fs'),
+	path = require('path'),
+
+	groups = require('../groups'),
 	meta = require('../meta'),
 	plugins = require('../plugins'),
 	widgets = require('../widgets'),
 	user = require('../user'),
 	topics = require('../topics'),
+	posts = require('../posts'),
 	categories = require('../categories'),
-	CategoryTools = require('../categoryTools'),
 	logger = require('../logger'),
 	events = require('../events'),
+	emailer = require('../emailer'),
 	db = require('../database'),
-	async = require('async'),
-	winston = require('winston'),
 	index = require('./index'),
+
 
 	SocketAdmin = {
 		user: require('./admin/user'),
 		categories: require('./admin/categories'),
 		groups: require('./admin/groups'),
+		tags: require('./admin/tags'),
 		themes: {},
 		plugins: {},
 		widgets: {},
 		config: {},
-		settings: {}
+		settings: {},
+		email: {},
+		analytics: {}
 	};
 
-SocketAdmin.before = function(socket, next) {
+SocketAdmin.before = function(socket, method, next) {
 	user.isAdministrator(socket.uid, function(err, isAdmin) {
 		if (!err && isAdmin) {
 			next();
 		} else {
-			winston.warn('[socket.io] Call to admin method blocked (accessed by uid ' + socket.uid + ')');
+			winston.warn('[socket.io] Call to admin method ( ' + method + ' ) blocked (accessed by uid ' + socket.uid + ')');
 		}
 	});
 };
 
-SocketAdmin.restart = function(socket, data, callback) {
-	meta.restart();
+SocketAdmin.reload = function(socket, data, callback) {
+	events.logWithUser(socket.uid, ' is reloading NodeBB');
+	if (cluster.isWorker) {
+		process.send({
+			action: 'reload'
+		});
+	} else {
+		meta.reload(callback);
+	}
 };
 
-SocketAdmin.getVisitorCount = function(socket, data, callback) {
-	var terms = {
-		day: 86400000,
-		week: 604800000,
-		month: 2592000000
-	};
-	var now = Date.now();
-	async.parallel({
-		day: function(next) {
-			db.sortedSetCount('ip:recent', now - terms.day, now, next);
-		},
-		week: function(next) {
-			db.sortedSetCount('ip:recent', now - terms.week, now, next);
-		},
-		month: function(next) {
-			db.sortedSetCount('ip:recent', now - terms.month, now, next);
-		},
-		alltime: function(next) {
-			db.sortedSetCount('ip:recent', 0, now, next);
-		}
-	}, callback);
+SocketAdmin.restart = function(socket, data, callback) {
+	events.logWithUser(socket.uid, ' is restarting NodeBB');
+	meta.restart();
 };
 
 SocketAdmin.fireEvent = function(socket, data, callback) {
@@ -76,19 +74,32 @@ SocketAdmin.themes.set = function(socket, data, callback) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
-	widgets.reset(function(err) {
+	var wrappedCallback = function(err) {
 		meta.themes.set(data, function() {
 			callback();
 		});
-	});
+	};
+	if (data.type === 'bootswatch') {
+		wrappedCallback();
+	} else {
+		widgets.reset(wrappedCallback);
+	}
+};
+
+SocketAdmin.themes.updateBranding = function(socket, data, callback) {
+	meta.css.updateBranding();
 };
 
 SocketAdmin.plugins.toggleActive = function(socket, plugin_id, callback) {
 	plugins.toggleActive(plugin_id, callback);
 };
 
-SocketAdmin.plugins.toggleInstall = function(socket, plugin_id, callback) {
-	plugins.toggleInstall(plugin_id, callback);
+SocketAdmin.plugins.toggleInstall = function(socket, data, callback) {
+	plugins.toggleInstall(data.id, data.version, callback);
+};
+
+SocketAdmin.plugins.upgrade = function(socket, data, callback) {
+	plugins.upgrade(data.id, data.version, callback);
 };
 
 SocketAdmin.widgets.set = function(socket, data, callback) {
@@ -124,6 +135,31 @@ SocketAdmin.config.set = function(socket, data, callback) {
 	});
 };
 
+SocketAdmin.config.setMultiple = function(socket, data, callback) {
+	if(!data) {
+		return callback(new Error('[[error:invalid-data]]'));
+	}
+
+	meta.configs.setMultiple(data, function(err) {
+		if(err) {
+			return callback(err);
+		}
+
+		callback();
+		var setting;
+		for(var field in data) {
+			if (data.hasOwnProperty(field)) {
+				setting = {
+					key: field,
+					value: data[field]
+				};
+				plugins.fireHook('action:config.set', setting);
+				logger.monitorConfig({io: index.server}, setting);
+			}
+		}
+	});
+};
+
 SocketAdmin.config.remove = function(socket, key) {
 	meta.configs.remove(key);
 };
@@ -134,6 +170,101 @@ SocketAdmin.settings.get = function(socket, data, callback) {
 
 SocketAdmin.settings.set = function(socket, data, callback) {
 	meta.settings.set(data.hash, data.values, callback);
+};
+
+SocketAdmin.email.test = function(socket, data, callback) {
+	if (plugins.hasListeners('action:email.send')) {
+		emailer.send('test', socket.uid, {
+			subject: '[NodeBB] Test Email',
+			site_title: meta.config.title || 'NodeBB'
+		});
+		callback();
+	} else {
+		callback(new Error('[[error:no-emailers-configured]]'));
+	}
+};
+
+SocketAdmin.analytics.get = function(socket, data, callback) {
+	data.units = 'hours'; // temp
+	data.amount = 12;
+
+	if (data && data.graph && data.units && data.amount) {
+		if (data.graph === 'traffic') {
+			async.parallel({
+				uniqueVisitors: function(next) {
+					getHourlyStatsForSet('analytics:uniquevisitors', data.amount, next);
+				},
+				pageviews: function(next) {
+					getHourlyStatsForSet('analytics:pageviews', data.amount, next);
+				}
+			}, callback);
+		}
+	} else {
+		callback(new Error('Invalid analytics call'));
+	}
+};
+
+function getHourlyStatsForSet(set, hours, callback) {
+	var hour = new Date(),
+		terms = {},
+		hoursArr = [];
+
+	hour.setHours(hour.getHours(), 0, 0, 0);
+
+	for (var i = 0, ii = hours; i < ii; i++) {
+		hoursArr.push(hour.getTime());
+		hour.setHours(hour.getHours() - 1, 0, 0, 0);
+	}
+
+	async.each(hoursArr, function(term, next) {
+		if (set.indexOf('analytics') !== -1) {
+			db.sortedSetScore(set, term, function(err, count) {
+				terms[term] = count || 0;
+				next(err);
+			});
+		} else {
+			db.sortedSetCount(set, term, Date.now(), function(err, count) {
+				terms[term] = count || 0;
+				next(err);
+			});
+		}
+
+	}, function(err) {
+		var termsArr = [];
+
+		hoursArr.reverse();
+		hoursArr.forEach(function(hour, idx) {
+			termsArr.push(terms[hour]);
+		});
+
+		callback(err, termsArr);
+	});
+}
+
+SocketAdmin.getMoreEvents = function(socket, next, callback) {
+	if (parseInt(next, 10) < 0) {
+		return callback(null, {data: [], next: next});
+	}
+	events.getLog(next, 5000, callback);
+};
+
+
+SocketAdmin.dismissFlag = function(socket, pid, callback) {
+	if (!pid) {
+		return callback('[[error:invalid-data]]');
+	}
+
+	posts.dismissFlag(pid, callback);
+};
+
+SocketAdmin.getMoreFlags = function(socket, after, callback) {
+	if (!parseInt(after, 10)) {
+		return callback('[[error:invalid-data]]');
+	}
+	after = parseInt(after, 10);
+	posts.getFlags(socket.uid, after, after + 19, function(err, posts) {
+		callback(err, {posts: posts, next: after + 20});
+	});
 };
 
 module.exports = SocketAdmin;

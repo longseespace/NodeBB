@@ -1,10 +1,11 @@
 "use strict";
 
-var groups = require('../../groups'),
+var async = require('async'),
+
+	groups = require('../../groups'),
 	user = require('../../user'),
 	categories = require('../../categories'),
-	categoryTools = require('../../categoryTools'),
-	async = require('async'),
+	privileges = require('../../privileges'),
 	Categories = {};
 
 Categories.create = function(socket, data, callback) {
@@ -13,6 +14,10 @@ Categories.create = function(socket, data, callback) {
 	}
 
 	categories.create(data, callback);
+};
+
+Categories.purge = function(socket, cid, callback) {
+	categories.purge(cid, callback);
 };
 
 Categories.update = function(socket, data, callback) {
@@ -32,8 +37,12 @@ Categories.search = function(socket, data, callback) {
 		cid = data.cid;
 
 	user.search(username, function(err, data) {
+		if (err) {
+			return callback(err);
+		}
+
 		async.map(data.users, function(userObj, next) {
-			categoryTools.privileges(cid, userObj.uid, function(err, privileges) {
+			privileges.categories.userPrivileges(cid, userObj.uid, function(err, privileges) {
 				if(err) {
 					return next(err);
 				}
@@ -50,69 +59,35 @@ Categories.setPrivilege = function(socket, data, callback) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
-	var	cid = data.cid,
-		uid = data.uid,
-		privilege = data.privilege,
-		set = data.set,
-		cb = function(err) {
-			if(err) {
-				return callback(err);
-			}
-			categoryTools.privileges(cid, uid, callback);
-		};
-
-	if (set) {
-		groups.join('cid:' + cid + ':privileges:' + privilege, uid, cb);
-	} else {
-		groups.leave('cid:' + cid + ':privileges:' + privilege, uid, cb);
-	}
+	groups[data.set ? 'join' : 'leave']('cid:' + data.cid + ':privileges:' + data.privilege, data.uid, callback);
 };
 
 Categories.getPrivilegeSettings = function(socket, cid, callback) {
-	async.parallel({
-		"+r": function(next) {
-			groups.get('cid:' + cid + ':privileges:+r', { expand: true }, function(err, groupObj) {
-				if (!err) {
-					next.apply(this, arguments);
-				} else {
-					next(null, {
-						members: []
-					});
-				}
-			});
-		},
-		"+w": function(next) {
-			groups.get('cid:' + cid + ':privileges:+w', { expand: true }, function(err, groupObj) {
-				if (!err) {
-					next.apply(this, arguments);
-				} else {
-					next(null, {
-						members: []
-					});
-				}
-			});
-		},
-		"mods": function(next) {
-			groups.get('cid:' + cid + ':privileges:mods', { expand: true }, function(err, groupObj) {
-				if (!err) {
-					next.apply(this, arguments);
-				} else {
-					next(null, {
-						members: []
-					});
-				}
-			});
-		}
-	}, function(err, data) {
-		if(err) {
-			return callback(err);
+	var privileges = ['find', 'read', 'topics:create', 'topics:reply', 'mods'];
+
+	async.reduce(privileges, [], function(members, privilege, next) {
+		groups.get('cid:' + cid + ':privileges:' + privilege, { expand: true }, function(err, groupObj) {
+			if (!err) {
+				members = members.concat(groupObj.members);
+			}
+
+			next(null, members);
+		});
+	}, function(err, members) {
+		// Remove duplicates
+		var	present = [],
+			x = members.length,
+			uid;
+		while(x--) {
+			uid = parseInt(members[x].uid, 10);
+			if (present.indexOf(uid) !== -1) {
+				members.splice(x, 1);
+			} else {
+				present.push(uid);
+			}
 		}
 
-		callback(null, {
-			"+r": data['+r'].members,
-			"+w": data['+w'].members,
-			"mods": data.mods.members
-		});
+		callback(err, members);
 	});
 };
 
@@ -121,11 +96,13 @@ Categories.setGroupPrivilege = function(socket, data, callback) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
-	if (data.set) {
-		groups.join('cid:' + data.cid + ':privileges:' + data.privilege, data.name, callback);
-	} else {
-		groups.leave('cid:' + data.cid + ':privileges:' + data.privilege, data.name, callback);
-	}
+	groups[data.set ? 'join' : 'leave']('cid:' + data.cid + ':privileges:' + data.privilege, data.name, function (err) {
+		if (err) {
+			return callback(err);
+		}
+
+		groups.hide('cid:' + data.cid + ':privileges:' + data.privilege, callback);
+	});
 };
 
 Categories.groupsList = function(socket, cid, callback) {
@@ -138,7 +115,7 @@ Categories.groupsList = function(socket, cid, callback) {
 		}
 
 		async.map(data, function(groupObj, next) {
-			categoryTools.groupPrivileges(cid, groupObj.name, function(err, privileges) {
+			privileges.categories.groupPrivileges(cid, groupObj.name, function(err, privileges) {
 				if(err) {
 					return next(err);
 				}

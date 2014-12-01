@@ -3,7 +3,7 @@
 /* globals define, socket, translator, utils, config, app, ajaxify, Tinycon*/
 
 
-define(['sounds'], function(sound) {
+define('notifications', ['sounds'], function(sound) {
 	var Notifications = {};
 
 	Notifications.prepareDOM = function() {
@@ -25,7 +25,7 @@ define(['sounds'], function(sound) {
 							image = '';
 						}
 
-						return '<li class="' + (notification.readClass || '') + '"><a href="' + notification.path + '">' + image + '<span class="pull-right relTime">' + utils.relativeTime(notification.datetime, true) + '</span><span class="text">' + notification.text + '</span></a></li>';
+						return '<li class="' + (notification.readClass || '') + '"><a href="' + (notification.path || '#') + '">' + image + '<span class="pull-right relTime">' + utils.relativeTime(notification.datetime, true) + '</span><span class="text">' + notification.bodyShort + '</span></a></li>';
 					}
 
 					var	x, html = '';
@@ -39,27 +39,17 @@ define(['sounds'], function(sound) {
 						for (x = 0; x < data.read.length; x++) {
 							html += createNotification(data.read[x]);
 						}
-
-						addSeeAllLink();
-
 					} else {
 						html += '<li class="no-notifs"><a>[[notifications:no_notifs]]</a></li>';
-						addSeeAllLink();
 					}
 
-					function addSeeAllLink() {
-						html += '<li class="pagelink"><a href="' + config.relative_path + '/notifications">[[notifications:see_all]]</a></li>';
-					}
+					html += '<li class="pagelink"><a href="' + config.relative_path + '/notifications">[[notifications:see_all]]</a></li>';
 
-
-					translator.translate(html, function(translated) {
-						notifList.html(translated);
-					});
-
+					notifList.translateHtml(html);
 
 					updateNotifCount(data.unread.length);
 
-					socket.emit('modules.notifications.mark_all_read', null, function(err) {
+					socket.emit('modules.notifications.markAllRead', null, function(err) {
 						if (!err) {
 							updateNotifCount(0);
 						}
@@ -68,7 +58,7 @@ define(['sounds'], function(sound) {
 			}
 		});
 
-		var	updateNotifCount = function(count) {
+		function updateNotifCount(count) {
 			if (count > 0) {
 				notifIcon.removeClass('fa-bell-o').addClass('fa-bell');
 			} else {
@@ -79,8 +69,12 @@ define(['sounds'], function(sound) {
 			notifIcon.attr('data-content', count > 20 ? '20+' : count);
 
 			Tinycon.setBubble(count);
-			localStorage.setItem('notifications:count', count);
 		};
+
+		function increaseNotifCount() {
+			var count = parseInt(notifIcon.attr('data-content'), 10) + 1;
+			updateNotifCount(count);
+		}
 
 		socket.emit('notifications.getCount', function(err, count) {
 			if (!err) {
@@ -90,8 +84,7 @@ define(['sounds'], function(sound) {
 			}
 		});
 
-		socket.on('event:new_notification', function() {
-
+		socket.on('event:new_notification', function(notifData) {
 			app.alert({
 				alert_id: 'new_notif',
 				title: '[[notifications:new_notification]]',
@@ -105,11 +98,11 @@ define(['sounds'], function(sound) {
 				ajaxify.refresh();
 			}
 
-			var	savedCount = parseInt(localStorage.getItem('notifications:count'), 10) || 0;
-			updateNotifCount(savedCount + 1);
+			increaseNotifCount();
 
 			sound.play('notification');
 		});
+
 		socket.on('event:notifications.updateCount', function(count) {
 			updateNotifCount(count);
 		});

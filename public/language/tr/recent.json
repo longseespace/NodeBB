@@ -3,5 +3,7 @@
     "day": "Gün",
     "week": "Hafta",
     "month": "Ay",
+    "year": "Yıl",
+    "alltime": "All Time",
     "no_recent_topics": "Güncel konular yok."
 }

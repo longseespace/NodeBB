@@ -11,13 +11,10 @@ var async = require('async'),
 
 	DATABASES = {
 		"redis": {
-			"dependencies": ["redis@~0.10.1", "connect-redis@~1.4"]
+			"dependencies": ["redis@~0.10.1", "connect-redis@~2.0.0"]
 		},
 		"mongo": {
 			"dependencies": ["mongodb", "connect-mongo"]
-		},
-		"level": {
-			"dependencies": ["levelup", "leveldown", "connect-leveldb"]
 		}
 	};
 
@@ -28,8 +25,8 @@ var install = {},
 questions.main = [
 	{
 		name: 'base_url',
-		description: 'URL of this installation',
-		'default': nconf.get('base_url') || 'http://localhost',
+		description: 'URL used to access this NodeBB',
+		'default': nconf.get('base_url') ? (nconf.get('base_url') + (nconf.get('use_port') ? ':' + nconf.get('port') : '')) : 'http://localhost:4567',
 		pattern: /^http(?:s)?:\/\//,
 		message: 'Base URL must begin with \'http://\' or \'https://\'',
 	},
@@ -39,13 +36,6 @@ questions.main = [
 		'default': nconf.get('port') || 4567,
 		pattern: /[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]/,
 		message: 'Please enter a value betweeen 1 and 65535'
-	},
-	{
-		name: 'use_port',
-		description: 'Use a port number to access NodeBB?',
-		'default': (nconf.get('use_port') !== undefined ? (nconf.get('use_port') ? 'y' : 'n') : 'y'),
-		pattern: /y[es]*|n[o]?/,
-		message: 'Please enter \'yes\' or \'no\''
 	},
 	{
 		name: 'secret',
@@ -168,8 +158,7 @@ function setupConfig(next) {
 		var	config = {},
 			redisQuestions = require('./database/redis').questions,
 			mongoQuestions = require('./database/mongo').questions,
-			levelQuestions = require('./database/level').questions,
-			question, x, numQ, allQuestions = questions.main.concat(redisQuestions).concat(mongoQuestions.concat(levelQuestions));
+			question, x, numQ, allQuestions = questions.main.concat(redisQuestions).concat(mongoQuestions);
 
 		for(x=0,numQ=allQuestions.length;x<numQ;x++) {
 			question = allQuestions[x];
@@ -183,6 +172,9 @@ function setupConfig(next) {
 }
 
 function completeConfigSetup(err, config, next) {
+	if (err) {
+		return next(err);
+	}
 	// Add CI object
 	if (install.ciVals) {
 		config.test_database = {};
@@ -195,16 +187,13 @@ function completeConfigSetup(err, config, next) {
 
 	config.bcrypt_rounds = 12;
 	config.upload_path = '/public/uploads';
-	config.use_port = typeof config.use_port === 'boolean' ? config.use_port : config.use_port.slice(0, 1) === 'y';
 
 	var urlObject = url.parse(config.base_url),
-		relative_path = (urlObject.pathname && urlObject.pathname.length > 1) ? urlObject.pathname : '',
-		host = urlObject.host,
-		protocol = urlObject.protocol,
 		server_conf = config;
 
-	server_conf.base_url = protocol + '//' + host;
-	server_conf.relative_path = relative_path;
+	server_conf.base_url = urlObject.protocol + '//' + urlObject.hostname;
+	server_conf.use_port = urlObject.port !== null ? true : false;
+	server_conf.relative_path = (urlObject.pathname && urlObject.pathname.length > 1) ? urlObject.pathname : '';
 
 	install.save(server_conf, function(err) {
 		if (err) {
@@ -216,6 +205,16 @@ function completeConfigSetup(err, config, next) {
 }
 
 function setupDatabase(server_conf, next) {
+	install.installDbDependencies(server_conf, function(err) {
+		if (err) {
+			return next(err);
+		}
+
+		require('./database').init(next);
+	});
+}
+
+install.installDbDependencies = function(server_conf, next) {
 	var	npm = require('npm'),
 		packages = [];
 
@@ -224,26 +223,22 @@ function setupDatabase(server_conf, next) {
 			next(err);
 		}
 
+		npm.config.set('spin', false);
+
 		packages = packages.concat(DATABASES[server_conf.database].dependencies);
 		if (server_conf.secondary_database) {
 			packages = packages.concat(DATABASES[server_conf.secondary_database].dependencies);
 		}
 
-		npm.commands.install(packages, function(err) {
-			if (err) {
-				return next(err);
-			}
-
-			require('./database').init(next);
-		});
+		npm.commands.install(packages, next);
 	});
-}
+};
 
 function setupDefaultConfigs(next) {
 	winston.info('Populating database with default configs, if not already set...');
 	var meta = require('./meta'),
 		defaults = require(path.join(__dirname, '../', 'install/data/defaults.json'));
-	
+
 	async.each(defaults, function (configObj, next) {
 		meta.configs.setOnEmpty(configObj.field, configObj.value, next);
 	}, function (err) {
@@ -251,29 +246,35 @@ function setupDefaultConfigs(next) {
 	});
 
 	if (install.values) {
-		if (install.values['social:twitter:key'] && install.values['social:twitter:secret']) {
-			meta.configs.setOnEmpty('social:twitter:key', install.values['social:twitter:key']);
-			meta.configs.setOnEmpty('social:twitter:secret', install.values['social:twitter:secret']);
-		}
-		if (install.values['social:google:id'] && install.values['social:google:secret']) {
-			meta.configs.setOnEmpty('social:google:id', install.values['social:google:id']);
-			meta.configs.setOnEmpty('social:google:secret', install.values['social:google:secret']);
-		}
-		if (install.values['social:facebook:key'] && install.values['social:facebook:secret']) {
-			meta.configs.setOnEmpty('social:facebook:app_id', install.values['social:facebook:app_id']);
-			meta.configs.setOnEmpty('social:facebook:secret', install.values['social:facebook:secret']);
-		}
+		setOnEmpty('social:twitter:key', 'social:twitter:secret');
+		setOnEmpty('social:google:id', 'social:google:secret');
+		setOnEmpty('social:facebook:app_id', 'social:facebook:secret');
+	}
+}
+
+function setOnEmpty(key1, key2) {
+	var meta = require('./meta');
+	if (install.values[key1] && install.values[key2]) {
+		meta.configs.setOnEmpty(key1, install.values[key1]);
+		meta.configs.setOnEmpty(key2, install.values[key2]);
 	}
 }
 
 function enableDefaultTheme(next) {
 	var	meta = require('./meta');
-	winston.info('Enabling default theme: Lavender');
 
-	meta.themes.set({
-		type: 'local',
-		id: 'nodebb-theme-lavender'
-	}, next);
+	meta.configs.get('theme:id', function(err, id) {
+		if (err || id) {
+			winston.info('Previous theme detected, skipping enabling default theme');
+			return next(err);
+		}
+
+		winston.info('Enabling default theme: Lavender');
+		meta.themes.set({
+			type: 'local',
+			id: 'nodebb-theme-lavender'
+		}, next);
+	});
 }
 
 function createAdministrator(next) {
@@ -374,25 +375,42 @@ function createAdmin(callback) {
 function createCategories(next) {
 	var Categories = require('./categories');
 
-	Categories.getAllCategories(0, function (err, data) {
-		if (data.categories.length === 0) {
-			winston.warn('No categories found, populating instance with default categories');
+	Categories.getAllCategories(0, function (err, categoryData) {
+		if (err) {
+			return next(err);
+		}
 
-			fs.readFile(path.join(__dirname, '../', 'install/data/categories.json'), function (err, default_categories) {
-				default_categories = JSON.parse(default_categories);
+		if (Array.isArray(categoryData) && categoryData.length) {
+			winston.info('Categories OK. Found ' + categoryData.length + ' categories.');
+			return next();
+		}
 
-				async.eachSeries(default_categories, function (category, next) {
-					Categories.create(category, next);
-				}, function (err) {
-					if (!err) {
-						next();
-					} else {
-						winston.error('Could not set up categories');
-					}
-				});
-			});
+		winston.warn('No categories found, populating instance with default categories');
+
+		fs.readFile(path.join(__dirname, '../', 'install/data/categories.json'), function (err, default_categories) {
+			if (err) {
+				return next(err);
+			}
+			default_categories = JSON.parse(default_categories);
+
+			async.eachSeries(default_categories, Categories.create, next);
+		});
+	});
+}
+
+function createWelcomePost(next) {
+	var db = require('./database'),
+		Topics = require('./topics');
+
+	db.sortedSetCard('topics:tid', function(err, numTopics) {
+		if (numTopics === 0) {
+			Topics.post({
+				uid: 1,
+				cid: 2,
+				title: 'Welcome to your NodeBB!',
+				content: '# Welcome to your brand new NodeBB forum!\n\nThis is what a topic and post looks like. As an administator, you can edit the post\'s title and content.\n\nTo customise your forum, go to the [Administrator Control Panel](../../admin). You can modify all aspects of your forum there, including installation of third-party plugins.\n\n## Additional Resources\n\n* [NodeBB Documentation](https://docs.nodebb.org)\n* [Community Support Forum](https://community.nodebb.org)\n* [Project repository](https://github.com/nodebb/nodebb)'
+			}, next);
 		} else {
-			winston.info('Categories OK. Found ' + data.categories.length + ' categories.');
 			next();
 		}
 	});
@@ -409,32 +427,22 @@ function enableDefaultPlugins(next) {
 		'nodebb-widget-essentials',
 		'nodebb-plugin-soundpack-default'
 	];
-
-	async.each(defaultEnabled, function (pluginId, next) {
-		Plugins.isActive(pluginId, function (err, active) {
-			if (!active) {
-				Plugins.toggleActive(pluginId, function () {
-					next();
-				});
-			} else {
-				next();
-			}
-		});
-	}, next);
+	var	db = require('./database');
+	db.setAdd('plugins:active', defaultEnabled, next);
 }
 
 function setCopyrightWidget(next) {
-	var	db = require('./database.js');
+	var	db = require('./database');
 
 	db.init(function(err) {
 		if (!err) {
-			db.setObjectField('widgets:global', 'footer', "[{\"widget\":\"html\",\"data\":{\"html\":\"<footer id=\\\"footer\\\" class=\\\"container footer\\\">\\r\\n\\t<div class=\\\"copyright\\\">\\r\\n\\t\\tCopyright © 2014 <a target=\\\"_blank\\\" href=\\\"https://www.nodebb.com\\\">NodeBB Forums</a> | <a target=\\\"_blank\\\" href=\\\"//github.com/designcreateplay/NodeBB/graphs/contributors\\\">Contributors</a>\\r\\n\\t</div>\\r\\n</footer>\",\"title\":\"\",\"container\":\"\"}}]", next);
+			db.setObjectField('widgets:global', 'footer', "[{\"widget\":\"html\",\"data\":{\"html\":\"<footer id=\\\"footer\\\" class=\\\"container footer\\\">\\r\\n\\t<div class=\\\"copyright\\\">\\r\\n\\t\\tCopyright © 2014 <a target=\\\"_blank\\\" href=\\\"https://www.nodebb.com\\\">NodeBB Forums</a> | <a target=\\\"_blank\\\" href=\\\"//github.com/NodeBB/NodeBB/graphs/contributors\\\">Contributors</a>\\r\\n\\t</div>\\r\\n</footer>\",\"title\":\"\",\"container\":\"\"}}]", next);
 		}
 	});
 }
 
 install.setup = function (callback) {
-	async.series([checkSetupFlag, checkCIFlag, setupConfig, setupDefaultConfigs, enableDefaultTheme, createAdministrator, createCategories, enableDefaultPlugins, setCopyrightWidget,
+	async.series([checkSetupFlag, checkCIFlag, setupConfig, setupDefaultConfigs, enableDefaultTheme, createAdministrator, createCategories, createWelcomePost, enableDefaultPlugins, setCopyrightWidget,
 		function (next) {
 			require('./upgrade').upgrade(next);
 		}

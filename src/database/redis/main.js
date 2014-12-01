@@ -1,11 +1,11 @@
 "use strict";
 
 module.exports = function(redisClient, module) {
-	module.searchIndex = function(key, content, id) {
+	module.searchIndex = function(key, content, id, callback) {
 		if (key === 'post') {
-			module.postSearch.index(content, id);
+			module.postSearch.index(content, id, callback);
 		} else if(key === 'topic') {
-			module.topicSearch.index(content, id);
+			module.topicSearch.index(content, id, callback);
 		}
 	};
 
@@ -27,13 +27,9 @@ module.exports = function(redisClient, module) {
 
 	module.searchRemove = function(key, id, callback) {
 		if(key === 'post') {
-			module.postSearch.remove(id);
+			module.postSearch.remove(id, callback);
 		} else if(key === 'topic') {
-			module.topicSearch.remove(id);
-		}
-
-		if (typeof callback === 'function') {
-			callback();
+			module.topicSearch.remove(id, callback);
 		}
 	};
 
@@ -75,6 +71,14 @@ module.exports = function(redisClient, module) {
 
 	module.delete = function(key, callback) {
 		redisClient.del(key, callback);
+	};
+
+	module.deleteAll = function(keys, callback) {
+		var multi = redisClient.multi();
+		for(var i=0; i<keys.length; ++i) {
+			multi.del(keys[i]);
+		}
+		multi.exec(callback);
 	};
 
 	module.get = function(key, callback) {

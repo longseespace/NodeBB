@@ -5,9 +5,13 @@ var path = require('path'),
 	sm = require('sitemap'),
 	url = require('url'),
 	nconf = require('nconf'),
+	db = require('./database'),
 	categories = require('./categories'),
 	topics = require('./topics'),
+	privileges = require('./privileges'),
+	utils = require('../public/src/utils'),
 	sitemap = {
+		obj: undefined,
 		getStaticUrls: function(callback) {
 			callback(null, [{
 				url: '',
@@ -26,18 +30,18 @@ var path = require('path'),
 		getDynamicUrls: function(callback) {
 			var returnUrls = [];
 
-			async.parallel([
-				function(next) {
+			async.parallel({
+				categoryUrls: function(next) {
 					var categoryUrls = [];
-					categories.getAllCategories(0, function(err, data) {
+					categories.getCategoriesByPrivilege(0, 'find', function(err, categoriesData) {
 						if (err) {
 							return next(err);
 						}
 
-						data.categories.forEach(function(category) {
-							if (!category.disabled) {
+						categoriesData.forEach(function(category) {
+							if (category) {
 								categoryUrls.push({
-									url: path.join('/category', category.slug),
+									url: '/category/' + category.cid + '/' + encodeURIComponent(utils.slugify(category.name)),
 									changefreq: 'weekly',
 									priority: '0.4'
 								});
@@ -45,45 +49,63 @@ var path = require('path'),
 						});
 
 						next(null, categoryUrls);
-					}, 0);
+					});
 				},
-				function(next) {
+				topicUrls: function(next) {
 					var topicUrls = [];
-					topics.getTopicsFromSet(0, 'topics:recent', 0, -1, function(err, data) {
+
+					db.getSortedSetRevRange('topics:recent', 0, 49, function(err, tids) {
 						if (err) {
 							return next(err);
 						}
+						privileges.topics.filter('read', tids, 0, function(err, tids) {
+							if (err) {
+								return next(err);
+							}
 
-						data.topics.forEach(function(topic) {
-							topicUrls.push({
-								url: path.join('/topic', topic.slug),
-								changefreq: 'daily',
-								priority: '0.6'
+							topics.getTopicsFields(tids, ['tid', 'title', 'lastposttime'], function(err, topics) {
+								if (err) {
+									return next(err);
+								}
+
+								topics.forEach(function(topic) {
+									if (topic) {
+										topicUrls.push({
+											url: '/topic/' + topic.tid + '/' + encodeURIComponent(utils.slugify(topic.title)),
+											lastmodISO: utils.toISOString(topic.lastposttime),
+											changefreq: 'daily',
+											priority: '0.6'
+										});
+									}
+								});
+
+								next(null, topicUrls);
 							});
 						});
-
-						next(null, topicUrls);
 					});
 				}
-			], function(err, data) {
+			}, function(err, data) {
 				if (!err) {
-					returnUrls = returnUrls.concat(data[0]).concat(data[1]);
+					returnUrls = data.categoryUrls.concat(data.topicUrls);
 				}
 
 				callback(err, returnUrls);
 			});
 		},
 		render: function(callback) {
+			if (sitemap.obj !== undefined && sitemap.obj.cache.length) {
+				return sitemap.obj.toXML(callback);
+			}
+
 			async.parallel([sitemap.getStaticUrls, sitemap.getDynamicUrls], function(err, urls) {
 				urls = urls[0].concat(urls[1]);
-				var map = sm.createSitemap({
-						hostname: nconf.get('url'),
-						cacheTime: 600000,
-						urls: urls
-					}),
-					xml = map.toXML(function(xml) {
-						callback(xml);
-					});
+				sitemap.obj = sm.createSitemap({
+					hostname: nconf.get('url'),
+					cacheTime: 1000 * 60 * 60,	// Cached for 1 hour
+					urls: urls
+				});
+
+				sitemap.obj.toXML(callback);
 			});
 		}
 	};

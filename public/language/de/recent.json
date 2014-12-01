@@ -3,5 +3,7 @@
     "day": "Tag",
     "week": "Woche",
     "month": "Monat",
+    "year": "Jahr",
+    "alltime": "Gesamter Zeitraum",
     "no_recent_topics": "Es gibt keine aktuellen Themen."
 }

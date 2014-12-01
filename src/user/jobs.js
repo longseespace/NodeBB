@@ -10,7 +10,8 @@ var db = require('../database'),
 	user = require('../user'),
 	topics = require('../topics'),
 	emailer = require('../emailer'),
-	meta = require('../meta');
+	meta = require('../meta'),
+	batch = require('../batch');
 
 module.exports = function(User) {
 	User.startJobs = function() {
@@ -22,75 +23,82 @@ module.exports = function(User) {
 	};
 
 	User.sendDailyDigests = function() {
-		var	yesterday = Date.now() - (1000*60*60*24);
+		var digestsDisabled = meta.config.disableEmailSubscriptions !== undefined && parseInt(meta.config.disableEmailSubscriptions, 10) === 1;
+		if (digestsDisabled) {
+			return winston.log('[user/jobs] Did not send daily digests because subscription system is disabled.');
+		}
 
-		async.parallel({
-			recent: function(next) {
-				topics.getLatestTopics(0, 0, 10, 'day', next);
-			},
-			uids: function(next) {
-				db.getSortedSetRange('users:joindate', 0, -1, next);
+		topics.getLatestTopics(0, 0, 10, 'day', function(err, data) {
+			if (err) {
+				return winston.error('[user/jobs] Could not send daily digests: ' + err.message);
 			}
-		}, function(err, data) {
-			var	now = new Date();
 
-			async.parallel({
-				recipients: function(next) {
-					User.getMultipleUserFields(data.uids, ['uid', 'username', 'lastonline'], next);
-				},
-				userSettings: function(next) {
-					User.getMultipleUserSettings(data.uids, next);
-				}
-			}, function(err, users) {
-				var recipients = users.recipients,
-					userSettings = users.userSettings,
-					subscribed;
-
-				// Find uids subscribed to daily digest emails
-				subscribed = userSettings.filter(function(setting) {
-					return setting.dailyDigestFreq === 'daily';
-				}).map(function(setting) {
-					return setting.uid;
-				});
-
-				// Find only those users who have not been online in the past 24 hours
-				var	users = recipients.filter(function(userObj) {
-					return subscribed.indexOf(userObj.uid) !== -1 && yesterday > parseInt(userObj.lastonline, 10);
-				});
-
-				// Consider using eachLimit, but *only* if people complain about email relays choking -- otherwise we're ok.
-				async.eachLimit(users, 100, function(userObj, next) {
-					user.notifications.getDailyUnread(userObj.uid, function(err, notifications) {
-						// Turn relative URLs into absolute ones
-						for(var i=0; i<notifications.length; ++i) {
-							if (notifications[i].image.indexOf('http') !== 0) {
-								notifications[i].image = nconf.get('url') + notifications[i].image;
-							}
-						}
-
-						// Send daily digest email
-						// winston.info('[user/notifications] Sending Daily Digest to uid ' + userObj.uid);
-						emailer.send('dailydigest', userObj.uid, {
-							subject: '[' + meta.config.title + '] Daily Digest for ' + now.getFullYear()+ '/' + (now.getMonth()+1) + '/' + now.getDate(),
-							username: userObj.username,
-							url: nconf.get('url'),
-							site_title: meta.config.title,
-							notifications: notifications,
-							recent: data.recent.topics
-						});
-
-						next(err);
-					});
-				}, function(err) {
-					// When finished...
-					if (!err) {
-						winston.info('[user/jobs] Daily Digests sent!');
-					} else {
-						winston.error('[user/jobs] Could not send daily digests: ' + err.message);
+			batch.processSortedSet('users:joindate', function(uids, next) {
+				User.getMultipleUserSettings(uids, function(err, userSettings) {
+					if (err) {
+						return next(err);
 					}
+
+					var subscribed = userSettings.filter(function(setting) {
+						return setting.dailyDigestFreq === 'daily';
+					}).map(function(setting) {
+						return setting.uid;
+					});
+
+					if (!subscribed.length) {
+						return next();
+					}
+
+					sendEmails(subscribed, data.topics, next);
 				});
+			}, function(err) {
+				if (err) {
+					winston.error('[user/jobs] Could not send daily digests: ' + err.message);
+				} else {
+					winston.info('[user/jobs] Daily Digests sent!');
+				}
 			});
 		});
 	};
+
+	function sendEmails(uids, recentTopics, callback) {
+		var	now = new Date();
+
+		User.getMultipleUserFields(uids, ['uid', 'username', 'lastonline'], function(err, users) {
+			if (err) {
+				winston.error('[user/jobs] Could not send daily digests: ' + err.message);
+				return callback(err);
+			}
+
+			async.eachLimit(users, 100, function(userObj, next) {
+				user.notifications.getDailyUnread(userObj.uid, function(err, notifications) {
+					if (err) {
+						winston.error('[user/jobs] Could not send daily digests: ' + err.message);
+						return next(err);
+					}
+
+					notifications = notifications.filter(Boolean);
+
+					for(var i=0; i<notifications.length; ++i) {
+						if (notifications[i].image.indexOf('http') !== 0) {
+							notifications[i].image = nconf.get('url') + notifications[i].image;
+						}
+					}
+
+					emailer.send('dailydigest', userObj.uid, {
+						subject: '[' + meta.config.title + '] Daily Digest for ' + now.getFullYear()+ '/' + (now.getMonth()+1) + '/' + now.getDate(),
+						username: userObj.username,
+						url: nconf.get('url'),
+						site_title: meta.config.title || meta.config.browserTitle || 'NodeBB',
+						notifications: notifications,
+						recent: recentTopics
+					});
+
+					next();
+				});
+			}, callback);
+		});
+	}
+
 };
 

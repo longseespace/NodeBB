@@ -1,7 +1,7 @@
 var	assert = require('assert'),
 	async = require('async'),
 
-	db = require('../mocks/databasemock'),
+	db = require('./mocks/databasemock'),
 	Groups = require('../src/groups'),
 	User = require('../src/user');
 
@@ -14,7 +14,7 @@ describe('Groups', function() {
 			},
 			function(next) {
 				// Create a new user
-				User.create({
+					User.create({
 					username: 'testuser',
 					email: 'b@c.com'
 				}, done);

@@ -8,14 +8,13 @@ var	_ = require('underscore'),
 	async = require('async'),
 	winston = require('winston'),
 
-	plugins = require('../plugins'),
-	pluginRoutes = [];
+	plugins = require('../plugins');
 
 
 module.exports = function(app, middleware, controllers) {
 	// Static Assets
-	app.get('/plugins/:id/*', function(req, res) {
-		var	relPath = req._parsedUrl.pathname.replace(nconf.get('relative_path') + '/plugins/', ''),
+	app.get('/plugins/:id/*', middleware.addExpiresHeaders, function(req, res) {
+		var	relPath = req._parsedUrl.pathname.replace('/plugins/', ''),
 			matches = _.map(plugins.staticDirs, function(realPath, mappedPath) {
 				if (relPath.match(mappedPath)) {
 					return mappedPath;
@@ -42,13 +41,13 @@ module.exports = function(app, middleware, controllers) {
 				});
 
 				if (matches.length) {
-					res.sendfile(matches[0]);
+					res.sendFile(matches[0]);
 				} else {
-					res.redirect('/404');
+					res.redirect(nconf.get('relative_path') + '/404');
 				}
 			});
 		} else {
-			res.redirect('/404');
+			res.redirect(nconf.get('relative_path') + '/404');
 		}
 	});
 };

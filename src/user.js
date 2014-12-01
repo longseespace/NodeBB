@@ -1,22 +1,16 @@
 'use strict';
 
-var bcrypt = require('bcryptjs'),
-	async = require('async'),
+var	async = require('async'),
 	nconf = require('nconf'),
-	winston = require('winston'),
 	gravatar = require('gravatar'),
 	S = require('string'),
 	pbkdf2 = require('pbkdf2-sha256'),
 
-	utils = require('./../public/src/utils'),
 	plugins = require('./plugins'),
 	db = require('./database'),
 	meta = require('./meta'),
 	groups = require('./groups'),
-	topics = require('./topics'),
-	events = require('./events'),
-	emitter = require('./emitter'),
-	Emailer = require('./emailer');
+	Password = require('./password');
 
 (function(User) {
 
@@ -76,7 +70,7 @@ var bcrypt = require('bcryptjs'),
 				return callback(err);
 			}
 
-			callback(null, modifyUserData(users, fieldsToRemove));
+			modifyUserData(users, fieldsToRemove, callback);
 		});
 	};
 
@@ -101,93 +95,99 @@ var bcrypt = require('bcryptjs'),
 				return callback(err);
 			}
 
-			callback(null, modifyUserData(users, []));
+			modifyUserData(users, [], callback);
 		});
 	};
 
-	function modifyUserData(users, fieldsToRemove) {
+	function modifyUserData(users, fieldsToRemove, callback) {
 		users.forEach(function(user) {
 			if (!user) {
 				return;
 			}
 
-			user.hasPassword = !!user.password;
 			if (user.password) {
-				user.password = null;
+				user.password = undefined;
 			}
 
 			if (!parseInt(user.uid, 10)) {
+				user.uid = 0;
 				user.username = '[[global:guest]]';
 				user.userslug = '';
+				user.picture = User.createGravatarURLFromEmail('');
 			}
 
 			if (user.picture) {
 				if (user.picture === user.uploadedpicture) {
-					user.picture = nconf.get('relative_path') + user.picture;
+					user.picture = user.picture.indexOf('http') === -1 ? nconf.get('relative_path') + user.picture : user.picture;
 				} else {
 					user.picture = User.createGravatarURLFromEmail(user.email);
 				}
-			} else {
-				user.picture = User.createGravatarURLFromEmail('');
 			}
 
 			for(var i=0; i<fieldsToRemove.length; ++i) {
 				user[fieldsToRemove[i]] = undefined;
 			}
 		});
-		return users;
+
+		plugins.fireHook('filter:users.get', users, callback);
 	}
 
 	User.updateLastOnlineTime = function(uid, callback) {
-		User.getUserField(uid, 'status', function(err, status) {
-			function cb(err) {
-				if(typeof callback === 'function') {
-					callback(err);
-				}
+		callback = callback || function() {};
+		User.getUserFields(uid, ['status', 'lastonline'], function(err, userData) {
+			if(err || userData.status === 'offline' || Date.now() - parseInt(userData.lastonline, 10) < 300000) {
+				return callback(err);
 			}
 
-			if(err || status === 'offline') {
-				return cb(err);
-			}
-
-			User.setUserField(uid, 'lastonline', Date.now(), cb);
+			User.setUserField(uid, 'lastonline', Date.now(), callback);
 		});
 	};
 
 	User.isReadyToPost = function(uid, callback) {
-		if (meta.config.allowGuestPosting && parseInt(uid, 10) === 0) {
+		if (parseInt(uid, 10) === 0) {
 			return callback();
 		}
 
 		async.parallel({
-			banned: function(next) {
-				User.getUserField(uid, 'banned', next);
+			userData: function(next) {
+				User.getUserFields(uid, ['banned', 'lastposttime', 'joindate', 'email', 'email:confirmed'], next);
 			},
 			exists: function(next) {
 				db.exists('user:' + uid, next);
 			},
-			lastposttime: function(next) {
-				User.getUserField(uid, 'lastposttime', next);
+			isAdmin: function(next) {
+				User.isAdministrator(uid, next);
 			}
 		}, function(err, results) {
 			if (err) {
 				return callback(err);
 			}
 
-			if (parseInt(results.banned, 10) === 1) {
-				return callback(new Error('[[error:user-banned]]'));
-			}
-
 			if (!results.exists) {
 				return callback(new Error('[[error:no-user]]'));
 			}
 
-			var lastposttime = results.lastposttime;
-			if (!lastposttime) {
-				lastposttime = 0;
+			if (results.isAdmin) {
+				return callback();
 			}
 
-			if (Date.now() - parseInt(lastposttime, 10) < parseInt(meta.config.postDelay, 10) * 1000) {
+			var userData = results.userData;
+
+			if (parseInt(userData.banned, 10) === 1) {
+				return callback(new Error('[[error:user-banned]]'));
+			}
+
+			if (userData.email && parseInt(meta.config.requireEmailConfirmation, 10) === 1 && parseInt(userData['email:confirmed'], 10) !== 1) {
+				return callback(new Error('[[error:email-not-confirmed]]'));
+			}
+			var now = Date.now();
+			if (now - parseInt(userData.joindate, 10) < parseInt(meta.config.initialPostDelay, 10) * 1000) {
+				return callback(new Error('[[error:user-too-new, ' + meta.config.initialPostDelay + ']]'));
+			}
+
+			var lastposttime = userData.lastposttime || 0;
+
+			if (now - parseInt(lastposttime, 10) < parseInt(meta.config.postDelay, 10) * 1000) {
 				return callback(new Error('[[error:too-many-posts, ' + meta.config.postDelay + ']]'));
 			}
 			callback();
@@ -232,7 +232,12 @@ var bcrypt = require('bcryptjs'),
 	User.getUsersFromSet = function(set, start, stop, callback) {
 		async.waterfall([
 			function(next) {
-				db.getSortedSetRevRange(set, start, stop, next);
+				if (set === 'users:online') {
+					var uids = require('./socket.io').getConnectedClients();
+					next(null, uids.slice(start, stop + 1));
+				} else {
+					db.getSortedSetRevRange(set, start, stop, next);
+				}
 			},
 			function(uids, next) {
 				User.getUsers(uids, next);
@@ -241,36 +246,33 @@ var bcrypt = require('bcryptjs'),
 	};
 
 	User.getUsers = function(uids, callback) {
-		function loadUserInfo(user, callback) {
-			if (!user) {
-				return callback(null, user);
+		async.parallel({
+			userData: function(next) {
+				User.getMultipleUserFields(uids, ['uid', 'username', 'userslug', 'picture', 'status', 'banned', 'postcount', 'reputation', 'email:confirmed'], next);
+			},
+			isAdmin: function(next) {
+				User.isAdministrator(uids, next);
+			},
+			isOnline: function(next) {
+				require('./socket.io').isUsersOnline(uids, next);
 			}
-
-			async.waterfall([
-				function(next) {
-					User.isAdministrator(user.uid, next);
-				},
-				function(isAdmin, next) {
-					user.status = !user.status ? 'online' : user.status;
-					user.administrator = isAdmin;
-					user.banned = parseInt(user.banned, 10) === 1;
-					db.isSortedSetMember('users:online', user.uid, next);
-				},
-				function(isMember, next) {
-					if (!isMember) {
-						user.status = 'offline';
-					}
-					next(null, user);
-				}
-			], callback);
-		}
-
-		User.getMultipleUserFields(uids, ['uid', 'username', 'userslug', 'picture', 'status', 'banned', 'postcount', 'reputation'], function(err, usersData) {
+		}, function(err, results) {
 			if (err) {
 				return callback(err);
 			}
 
-			async.map(usersData, loadUserInfo, callback);
+			results.userData.forEach(function(user, index) {
+				if (!user) {
+					return;
+				}
+				user.status = !user.status ? 'online' : user.status;
+				user.status = !results.isOnline[index] ? 'offline' : user.status;
+				user.administrator = results.isAdmin[index];
+				user.banned = parseInt(user.banned, 10) === 1;
+				user['email:confirmed'] = parseInt(user['email:confirmed'], 10) === 1;
+			});
+
+			callback(err, results.userData);
 		});
 	};
 
@@ -281,8 +283,8 @@ var bcrypt = require('bcryptjs'),
 		}
 
 		var options = {
-			size: '128',
-			default: customGravatarDefaultImage || meta.config.defaultGravatarImage || '',
+			size: parseInt(meta.config.profileImageDimension, 10) || 128,
+			default: customGravatarDefaultImage || meta.config.defaultGravatarImage || 'identicon',
 			rating: 'pg'
 		};
 
@@ -321,34 +323,36 @@ var bcrypt = require('bcryptjs'),
 		});
 	}
 
-	User.onNewPostMade = function(postData) {
-		User.addPostIdToUser(postData.uid, postData.pid, postData.timestamp);
-
-		User.incrementUserPostCountBy(postData.uid, 1);
-
-		User.setUserField(postData.uid, 'lastposttime', postData.timestamp);
+	User.onNewPostMade = function(postData, callback) {
+		async.parallel([
+			function(next) {
+				User.addPostIdToUser(postData.uid, postData.pid, postData.timestamp, next);
+			},
+			function(next) {
+				User.incrementUserPostCountBy(postData.uid, 1, next);
+			},
+			function(next) {
+				User.setUserField(postData.uid, 'lastposttime', postData.timestamp, next);
+			}
+		], callback);
 	};
 
-	emitter.on('event:newpost', User.onNewPostMade);
-
 	User.incrementUserPostCountBy = function(uid, value, callback) {
+		callback = callback || function() {};
 		User.incrementUserFieldBy(uid, 'postcount', value, function(err, newpostcount) {
 			if (err) {
-				if(typeof callback === 'function') {
-					callback(err);
-				}
-				return;
+				return callback(err);
 			}
 			db.sortedSetAdd('users:postcount', newpostcount, uid, callback);
 		});
 	};
 
-	User.addPostIdToUser = function(uid, pid, timestamp) {
-		db.sortedSetAdd('uid:' + uid + ':posts', timestamp, pid);
+	User.addPostIdToUser = function(uid, pid, timestamp, callback) {
+		db.sortedSetAdd('uid:' + uid + ':posts', timestamp, pid, callback);
 	};
 
-	User.addTopicIdToUser = function(uid, tid, timestamp) {
-		db.sortedSetAdd('uid:' + uid + ':topics', timestamp, tid);
+	User.addTopicIdToUser = function(uid, tid, timestamp, callback) {
+		db.sortedSetAdd('uid:' + uid + ':topics', timestamp, tid, callback);
 	};
 
 	User.getPostIds = function(uid, start, stop, callback) {
@@ -403,11 +407,11 @@ var bcrypt = require('bcryptjs'),
 	};
 
 	User.getUidByEmail = function(email, callback) {
-		db.getObjectField('email:uid', email, callback);
+		db.getObjectField('email:uid', email.toLowerCase(), callback);
 	};
 
 	User.getUsernameByEmail = function(email, callback) {
-		db.getObjectField('email:uid', email, function(err, uid) {
+		db.getObjectField('email:uid', email.toLowerCase(), function(err, uid) {
 			if (err) {
 				return callback(err);
 			}
@@ -416,33 +420,62 @@ var bcrypt = require('bcryptjs'),
 	};
 
 	User.isModerator = function(uid, cid, callback) {
-		groups.isMember(uid, 'cid:' + cid + ':privileges:mods', callback);
+		if (Array.isArray(cid)) {
+			var uniqueCids = cid.filter(function(cid, index, array) {
+				return array.indexOf(cid) === index;
+			});
+
+			var groupNames = uniqueCids.map(function(cid) {
+				return 'cid:' + cid + ':privileges:mods';
+			});
+
+			groups.isMemberOfGroups(uid, groupNames, function(err, isMembers) {
+				if (err) {
+					return callback(err);
+				}
+
+				var map = {};
+				uniqueCids.forEach(function(cid, index) {
+					map[cid] = isMembers[index];
+				});
+
+				callback(null, cid.map(function(cid) {
+					return map[cid];
+				}));
+			});
+		} else {
+			if (Array.isArray(uid)) {
+				groups.isMembers(uid, 'cid:' + cid + ':privileges:mods', callback);
+			} else {
+				groups.isMember(uid, 'cid:' + cid + ':privileges:mods', callback);
+			}
+		}
 	};
 
 	User.isAdministrator = function(uid, callback) {
-		groups.isMember(uid, 'administrators', callback);
+		if (Array.isArray(uid)) {
+			groups.isMembers(uid, 'administrators', callback);
+		} else {
+			groups.isMember(uid, 'administrators', callback);
+		}
 	};
 
-	User.isOnline = function(uid, callback) {
-		User.getUserFields(uid, ['username', 'userslug', 'picture', 'status'] , function(err, data) {
-			if(err) {
-				return callback(err);
-			}
+	User.getIgnoredCategories = function(uid, callback) {
+		db.getSortedSetRange('uid:' + uid + ':ignored:cids', 0, -1, callback);
+	};
 
-			var online = require('./socket.io').isUserOnline(uid);
+	User.ignoreCategory = function(uid, cid, callback) {
+		if (!uid) {
+			return callback();
+		}
+		db.sortedSetAdd('uid:' + uid + ':ignored:cids', Date.now(), cid, callback);
+	};
 
-			data.status = online ? (data.status || 'online') : 'offline';
-
-			if(data.status === 'offline') {
-				online = false;
-			}
-
-			data.online = online;
-			data.uid = uid;
-			data.timestamp = Date.now();
-
-			callback(null, data);
-		});
+	User.watchCategory = function(uid, cid, callback) {
+		if (!uid) {
+			return callback();
+		}
+		db.sortedSetRemove('uid:' + uid + ':ignored:cids', cid, callback);
 	};
 
 

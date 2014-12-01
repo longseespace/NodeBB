@@ -1,7 +1,7 @@
 "use strict";
 /* global define, socket, config */
 
-define(['buzz'], function(buzz) {
+define('sounds', ['buzz'], function(buzz) {
 	var	Sounds = {};
 
 	var loadedSounds = {};
@@ -57,6 +57,8 @@ define(['buzz'], function(buzz) {
 	};
 
 	Sounds.playFile = function(fileName) {
+		if (!fileName) return;
+
 		function play() {
 			if (loadedSounds[fileName]) {
 				loadedSounds[fileName].play();

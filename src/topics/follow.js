@@ -3,9 +3,12 @@
 
 var async = require('async'),
 	nconf = require('nconf'),
+	S = require('string'),
 
 	db = require('../database'),
 	user = require('../user'),
+	posts = require('../posts'),
+	postTools = require('../postTools'),
 	notifications = require('../notifications');
 
 module.exports = function(Topics) {
@@ -19,44 +22,38 @@ module.exports = function(Topics) {
 		db.getSetMembers('tid:' + tid + ':followers', callback);
 	};
 
-	Topics.notifyFollowers = function(tid, pid, exceptUid) {
-		async.parallel({
-			nid: function(next) {
-				Topics.getTopicFields(tid, ['title', 'slug'], function(err, topicData) {
-					if(err) {
-						return next(err);
-					}
-
-					user.getUserField(exceptUid, 'username', function(err, username) {
-						if(err) {
-							return next(err);
-						}
-
-						notifications.create({
-							text: '[[notifications:user_posted_to, ' + username + ', ' + topicData.title + ']]',
-							path: nconf.get('relative_path') + '/topic/' + topicData.slug + '#' + pid,
-							uniqueId: 'topic:' + tid,
-							from: exceptUid
-						}, function(nid) {
-							next(null, nid);
-						});
-					});
-				});
-			},
-			followers: function(next) {
-				Topics.getFollowers(tid, next);
+	Topics.notifyFollowers = function(postData, exceptUid) {
+		Topics.getFollowers(postData.topic.tid, function(err, followers) {
+			if (err || !Array.isArray(followers) || !followers.length) {
+				return;
 			}
-		}, function(err, results) {
-			if (!err && results.followers.length) {
 
-				var index = results.followers.indexOf(exceptUid.toString());
-				if (index !== -1) {
-					results.followers.splice(index, 1);
+			var index = followers.indexOf(exceptUid.toString());
+			if (index !== -1) {
+				followers.splice(index, 1);
+			}
+
+			if (!followers.length) {
+				return;
+			}
+
+			var title = postData.topic.title;
+			if (title) {
+				title = S(title).decodeHTMLEntities().s;
+			}
+
+			notifications.create({
+				bodyShort: '[[notifications:user_posted_to, ' + postData.user.username + ', ' + title + ']]',
+				bodyLong: postData.content,
+				pid: postData.pid,
+				nid: 'tid:' + postData.topic.tid + ':pid:' + postData.pid + ':uid:' + exceptUid,
+				tid: postData.topic.tid,
+				from: exceptUid
+			}, function(err, notification) {
+				if (!err && notification) {
+					notifications.push(notification, followers);
 				}
-
-				notifications.push(results.nid, results.followers);
-			}
+			});
 		});
 	};
-
 };

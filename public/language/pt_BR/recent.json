@@ -3,5 +3,7 @@
     "day": "Dia",
     "week": "Semana",
     "month": "Mês",
-    "no_recent_topics": "Nenhum tópico recente."
+    "year": "Ano",
+    "alltime": "Todos os Tempos",
+    "no_recent_topics": "Não há tópicos recentes."
 }
