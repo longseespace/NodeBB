@@ -15,12 +15,9 @@
     "test": "mocha ./tests -t 10000"
   },
   "dependencies": {
-
-    "bcryptjs": "~0.7.10",
-
+    "bcryptjs": "~2.0.1",
     "pbkdf2-sha256": "~1.0.1",
     "async": "~0.9.0",
-    "bcryptjs": "~2.0.1",
     "body-parser": "^1.9.0",
     "compression": "^1.1.0",
     "connect-ensure-login": "^0.1.1",
@@ -42,7 +39,6 @@
     "nodebb-plugin-dbsearch": "0.0.15",
     "nodebb-plugin-markdown": "^0.7.0",
     "nodebb-plugin-mentions": "~0.6.0",
-
     "nodebb-plugin-soundpack-default": "~0.1.1",
     "nodebb-theme-lavender": "0.1.13",
     "nodebb-theme-vanilla": "0.1.30",
@@ -66,7 +62,9 @@
     "underscore": "~1.7.0",
     "validator": "~3.21.0",
     "winston": "^0.8.0",
-    "xregexp": "~2.0.0"
+    "xregexp": "~2.0.0",
+    "mongodb": "~1.4.22",
+    "connect-mongo": "~0.4.1"
   },
   "devDependencies": {
     "mocha": "~1.13.0"
